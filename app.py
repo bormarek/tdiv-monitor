@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import openpyxl
 import yfinance as yf
 import pandas as pd
@@ -11,248 +11,257 @@ from deep_translator import GoogleTranslator
 
 app = Flask(__name__)
 
-VANECK_URL = 'https://www.vaneck.com/pl/pl/investments/dividend-etf/downloads/holdings/'
-VANECK_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'pl-PL,pl;q=0.9',
+# ── Konfiguracja funduszy ─────────────────────────────────────────────────────
+
+FUNDS = {
+    'tdiv': {
+        'id':       'tdiv',
+        'name':     'VanEck Morningstar Dividend Leaders ETF',
+        'short':    'TDIV',
+        'currency': 'USD',
+        'url':      'https://www.vaneck.com/pl/pl/investments/dividend-etf/downloads/holdings/',
+        'headers':  {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/121.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'pl-PL,pl;q=0.9',
+        },
+        'local_fallback': 'TDIV_nadzień_20260305.xlsx',
+    },
+    'swig80': {
+        'id':       'swig80',
+        'name':     'Beta ETF sWIG80TR',
+        'short':    'sWIG80',
+        'currency': 'PLN',
+        'url':      'https://wp00102-api.agiofunds.pl/uploads/funds/Portfolio/archive/PRTF_Beta%20ETF%20sWIG80TR.xlsx',
+        'headers':  {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/121.0 Safari/537.36',
+        },
+        'local_fallback': None,
+    },
 }
-CACHE_TTL = 900         # 15 minut
+
+CACHE_TTL      = 900    # 15 minut
 INFO_CACHE_TTL = 86400  # 24 godziny
 
-_cache = {}
-_info_cache = {}
+_cache      = {}   # key: fund_id
+_info_cache = {}   # key: ticker
 
-# Ręczne nadpisania dla tickerów których yfinance nie rozpoznaje po nazwie
+# ── Ticker helpers (TDIV / Bloomberg) ────────────────────────────────────────
+
 TICKER_OVERRIDES = {
-    'DBS SP':    'D05.SI',   # DBS Group - SGX symbol
-    'OCBC SP':   'O39.SI',   # OCBC Bank - SGX symbol
-    'UOB SP':    'U11.SI',   # United Overseas Bank - SGX symbol
-    'KEP SP':    'BN4.SI',   # Keppel Corp - SGX symbol
-    'WIL SP':    'F34.SI',   # Wilmar International - SGX symbol
-    'NOVOB DC':  'NOVO-B.CO', # Novo Nordisk B shares - Copenhagen
-    'EDP PL':    'EDP.LS',   # EDP - Lisbon
-    'LUMI IT':   'LUMI.TA',  # Bank Leumi - Tel Aviv
-    'MZTF IT':   'MZTF.TA',  # Mizrahi Tefahot - Tel Aviv
+    'DBS SP':   'D05.SI',
+    'OCBC SP':  'O39.SI',
+    'UOB SP':   'U11.SI',
+    'KEP SP':   'BN4.SI',
+    'WIL SP':   'F34.SI',
+    'NOVOB DC': 'NOVO-B.CO',
+    'EDP PL':   'EDP.LS',
+    'LUMI IT':  'LUMI.TA',
+    'MZTF IT':  'MZTF.TA',
 }
 
-# Mapowanie kodów giełd Bloomberg -> sufiksy yfinance
 EXCHANGE_MAP = {
-    'US': '',
-    'SW': '.SW',
-    'LN': '.L',
-    'FP': '.PA',
-    'GR': '.DE',
-    'SM': '.MC',
-    'DC': '.CO',
-    'NA': '.AS',
-    'IM': '.MI',
-    'AU': '.AX',
-    'HK': '.HK',
-    'JP': '.T',
-    'BB': '.BR',
-    'SS': '.ST',
-    'NO': '.OL',
-    'SP': '.SI',
-    'CN': '.TO',
-    'PW': '.WA',
-    'AV': '.VI',
-    'PL': '.LS',
-    'IT': '.TA',  # Israel Tel Aviv
-    'SJ': '.JO',
+    'US': '',   'SW': '.SW',  'LN': '.L',   'FP': '.PA',
+    'GR': '.DE','SM': '.MC',  'DC': '.CO',  'NA': '.AS',
+    'IM': '.MI','AU': '.AX',  'HK': '.HK',  'JP': '.T',
+    'BB': '.BR','SS': '.ST',  'NO': '.OL',  'SP': '.SI',
+    'CN': '.TO','PW': '.WA',  'AV': '.VI',  'PL': '.LS',
+    'IT': '.TA','SJ': '.JO',
 }
 
-def ticker_to_yfinance(ticker_str):
-    """Konwertuje ticker Bloomberg (np. 'XOM US') do formatu yfinance (np. 'XOM')."""
+
+def bloomberg_to_yfinance(ticker_str):
     key = ticker_str.strip()
     if key in TICKER_OVERRIDES:
         return TICKER_OVERRIDES[key]
-
     parts = key.split()
     if len(parts) < 2:
         return None
-
-    symbol = parts[0]
-    exchange = parts[-1]
-
+    symbol, exchange = parts[0], parts[-1]
     if exchange == '--' or symbol == '--':
         return None
-
-    # Zamień "/" w środku symbolu na "-" (np. BT/A -> BT-A), usuń na końcu (BP/ -> BP)
     if '/' in symbol:
-        if symbol.endswith('/'):
-            symbol = symbol.rstrip('/')
-        else:
-            symbol = symbol.replace('/', '-')
-
-    suffix = EXCHANGE_MAP.get(exchange, '')
-
-    # Hong Kong: dopełnij do 4 cyfr zerami (np. 66 -> 0066)
+        symbol = symbol.rstrip('/') if symbol.endswith('/') else symbol.replace('/', '-')
     if exchange == 'HK' and symbol.isdigit():
         symbol = symbol.zfill(4)
-
-    return symbol + suffix
-
-
-def fetch_excel_bytes():
-    """Pobiera aktualny plik Excel z VanEck. Zwraca bytes."""
-    r = requests.get(VANECK_URL, headers=VANECK_HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.content
+    return symbol + EXCHANGE_MAP.get(exchange, '')
 
 
-def load_holdings(excel_bytes=None):
-    """Wczytuje holdings z bytes (live) lub lokalnego pliku (fallback)."""
-    try:
-        if excel_bytes is None:
-            excel_bytes = fetch_excel_bytes()
-        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
-    except Exception:
-        # Fallback: lokalny plik jeśli URL niedostępny
-        local = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'TDIV_nadzień_20260305.xlsx')
-        wb = openpyxl.load_workbook(local)
+# ── Parsery Excel ─────────────────────────────────────────────────────────────
 
+def parse_tdiv(wb):
     ws = wb.active
     holdings = []
     for row in ws.iter_rows(min_row=4, values_only=True):
         if row[0] is None or not isinstance(row[0], int):
             continue
-        name = row[1]
-        ticker_raw = row[2]
-        weight_str = row[6]
+        name, ticker_raw, weight_str = row[1], row[2], row[6]
         if not name or not ticker_raw:
             continue
-        yf_ticker = ticker_to_yfinance(str(ticker_raw))
+        yf_ticker = bloomberg_to_yfinance(str(ticker_raw))
         if not yf_ticker:
             continue
         holdings.append({
-            'number': row[0],
-            'name': name,
+            'number':     row[0],
+            'name':       name,
             'ticker_raw': str(ticker_raw).strip(),
-            'ticker': yf_ticker,
-            'weight': weight_str,
+            'ticker':     yf_ticker,
+            'weight':     weight_str,
+            'sector':     '',
         })
     return holdings
 
 
+def parse_swig80(wb):
+    ws = wb.active
+    holdings = []
+    header_found = False
+    for row in ws.iter_rows(values_only=True):
+        if not header_found:
+            if row[0] == 'Lp.':
+                header_found = True
+            continue
+        if row[0] is None or not isinstance(row[0], int):
+            continue
+        name    = row[1]
+        isin    = row[2]
+        sector  = row[3] or ''
+        weight  = row[6]  # ułamek dziesiętny, np. 0.044
+        if not name or not isin:
+            continue
+        weight_str = f"{weight * 100:.2f}%".replace('.', ',') if weight else None
+        holdings.append({
+            'number':     row[0],
+            'name':       name,
+            'ticker_raw': isin,
+            'ticker':     isin,   # ISIN działa bezpośrednio w yfinance
+            'weight':     weight_str,
+            'sector':     sector,
+        })
+    return holdings
+
+
+PARSERS = {'tdiv': parse_tdiv, 'swig80': parse_swig80}
+
+
+def load_holdings(fund_id):
+    fund = FUNDS[fund_id]
+    source = 'live'
+    try:
+        r = requests.get(fund['url'], headers=fund['headers'], timeout=30)
+        r.raise_for_status()
+        wb = openpyxl.load_workbook(io.BytesIO(r.content))
+    except Exception as e:
+        source = f'local (błąd pobierania: {e})'
+        if fund['local_fallback']:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), fund['local_fallback'])
+            wb = openpyxl.load_workbook(path)
+        else:
+            return [], source
+    return PARSERS[fund_id](wb), source
+
+
+# ── Analiza cenowa ────────────────────────────────────────────────────────────
+
 def analyze_series(series):
-    """Zwraca słownik z analizą cenową dla danej serii danych."""
     result = {
-        'price': None,
-        'daily_change': None,
-        'daily_change_pct': None,
-        'daily_trend': 'unknown',
-        'ma5': None,
-        'ma5_trend': 'unknown',
+        'price': None, 'daily_change': None, 'daily_change_pct': None,
+        'daily_trend': 'unknown', 'ma5': None, 'ma5_trend': 'unknown',
     }
     if series is None or len(series) < 2:
         return result
-
-    last = float(series.iloc[-1])
-    prev = float(series.iloc[-2])
-
-    result['price'] = round(last, 2)
-    result['daily_change'] = round(last - prev, 4)
+    last, prev = float(series.iloc[-1]), float(series.iloc[-2])
+    result['price']            = round(last, 2)
+    result['daily_change']     = round(last - prev, 4)
     result['daily_change_pct'] = round((last - prev) / prev * 100, 2)
-    result['daily_trend'] = 'up' if last >= prev else 'down'
-
+    result['daily_trend']      = 'up' if last >= prev else 'down'
     if len(series) >= 6:
-        ma5_current = float(series.iloc[-5:].mean())
+        ma5_cur  = float(series.iloc[-5:].mean())
         ma5_prev = float(series.iloc[-6:-1].mean())
-        result['ma5'] = round(ma5_current, 2)
-        result['ma5_trend'] = 'up' if ma5_current > ma5_prev else 'down'
+        result['ma5']       = round(ma5_cur, 2)
+        result['ma5_trend'] = 'up' if ma5_cur > ma5_prev else 'down'
     elif len(series) >= 5:
         result['ma5'] = round(float(series.iloc[-5:].mean()), 2)
-
     return result
 
 
+# ── Endpointy ─────────────────────────────────────────────────────────────────
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', funds=list(FUNDS.values()))
+
+
+@app.route('/api/funds')
+def get_funds():
+    return jsonify(list(FUNDS.values()))
 
 
 @app.route('/api/data')
 def get_data():
+    fund_id = request.args.get('fund', 'tdiv')
+    if fund_id not in FUNDS:
+        return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
+
     global _cache
     now = time.time()
+    if fund_id in _cache and now - _cache[fund_id].get('timestamp', 0) < CACHE_TTL:
+        return jsonify(_cache[fund_id]['result'])
 
-    if 'result' in _cache and now - _cache.get('timestamp', 0) < CACHE_TTL:
-        return jsonify(_cache['result'])
-
-    # Pobierz aktualny Excel z VanEck
-    try:
-        excel_bytes = fetch_excel_bytes()
-        holdings = load_holdings(excel_bytes)
-        holdings_source = 'live'
-    except Exception as e:
-        holdings = load_holdings(None)  # fallback na lokalny plik
-        holdings_source = f'local (błąd VanEck: {e})'
-
+    holdings, holdings_source = load_holdings(fund_id)
     tickers = [h['ticker'] for h in holdings]
 
-    end_date = datetime.now()
+    end_date   = datetime.now()
     start_date = end_date - timedelta(days=25)
-
     try:
         raw = yf.download(
             tickers,
             start=start_date.strftime('%Y-%m-%d'),
             end=end_date.strftime('%Y-%m-%d'),
-            auto_adjust=True,
-            progress=False,
-            threads=True,
+            auto_adjust=True, progress=False, threads=True,
         )
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-    # Normalizacja: zawsze MultiIndex z Close
     if isinstance(raw.columns, pd.MultiIndex):
         close = raw['Close']
     else:
-        # Pojedynczy ticker
         close = raw[['Close']]
         close.columns = tickers
 
     results = []
     for h in holdings:
-        ticker = h['ticker']
         entry = {
-            'number': h['number'],
-            'name': h['name'],
-            'ticker': h['ticker_raw'],
-            'yf_ticker': ticker,
-            'weight': h['weight'],
+            'number':     h['number'],
+            'name':       h['name'],
+            'ticker':     h['ticker_raw'],
+            'yf_ticker':  h['ticker'],
+            'weight':     h['weight'],
+            'sector':     h.get('sector', ''),
         }
         try:
-            if ticker in close.columns:
-                series = close[ticker].dropna()
-                entry.update(analyze_series(series))
-            else:
-                entry.update(analyze_series(None))
+            series = close[h['ticker']].dropna() if h['ticker'] in close.columns else None
+            entry.update(analyze_series(series))
         except Exception as e:
             entry.update(analyze_series(None))
             entry['error'] = str(e)
-
         results.append(entry)
 
-    up_count = sum(1 for r in results if r.get('daily_trend') == 'up')
+    up_count   = sum(1 for r in results if r.get('daily_trend') == 'up')
     down_count = sum(1 for r in results if r.get('daily_trend') == 'down')
 
     response = {
-        'data': results,
-        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'data':            results,
+        'updated_at':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'holdings_source': holdings_source,
+        'fund':            FUNDS[fund_id],
         'summary': {
-            'up': up_count,
-            'down': down_count,
+            'up':      up_count,
+            'down':    down_count,
             'unknown': len(results) - up_count - down_count,
-        }
+        },
     }
-
-    _cache['result'] = response
-    _cache['timestamp'] = now
-
+    _cache[fund_id] = {'result': response, 'timestamp': now}
     return jsonify(response)
 
 
@@ -262,7 +271,6 @@ def get_info(ticker):
     now = time.time()
     if ticker in _info_cache and now - _info_cache[ticker].get('ts', 0) < INFO_CACHE_TTL:
         return jsonify(_info_cache[ticker]['data'])
-
     try:
         info = yf.Ticker(ticker).info
     except Exception as e:
@@ -274,7 +282,7 @@ def get_info(ticker):
         try:
             description_pl = GoogleTranslator(source='en', target='pl').translate(description_en)
         except Exception:
-            description_pl = description_en  # fallback na angielski
+            description_pl = description_en
 
     data = {
         'name':        info.get('longName') or info.get('shortName', ''),
@@ -285,7 +293,6 @@ def get_info(ticker):
         'website':     info.get('website', ''),
         'employees':   info.get('fullTimeEmployees'),
     }
-    # Cache tylko jeśli udało się pobrać opis (nie zapisuj pustych wyników)
     if data['description']:
         _info_cache[ticker] = {'data': data, 'ts': now}
     return jsonify(data)
@@ -293,16 +300,14 @@ def get_info(ticker):
 
 @app.route('/api/chart/<path:ticker>')
 def get_chart(ticker):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=180)  # 6 mies. żeby MA20 miała dane od początku
-
+    end_date   = datetime.now()
+    start_date = end_date - timedelta(days=180)
     try:
         raw = yf.download(
             ticker,
             start=start_date.strftime('%Y-%m-%d'),
             end=end_date.strftime('%Y-%m-%d'),
-            auto_adjust=True,
-            progress=False,
+            auto_adjust=True, progress=False,
         )
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -310,17 +315,10 @@ def get_chart(ticker):
     if raw.empty:
         return jsonify({'error': 'Brak danych dla tego tickera'}), 404
 
-    # Obsługa MultiIndex (yfinance zwraca MultiIndex nawet dla 1 tickera)
-    if isinstance(raw.columns, pd.MultiIndex):
-        close = raw['Close'].iloc[:, 0].dropna()
-    else:
-        close = raw['Close'].dropna()
-
-    ma5  = close.rolling(5).mean()
-    ma20 = close.rolling(20).mean()
-
-    def fmt(v):
-        return round(float(v), 2) if not pd.isna(v) else None
+    close = raw['Close'].iloc[:, 0].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw['Close'].dropna()
+    ma5   = close.rolling(5).mean()
+    ma20  = close.rolling(20).mean()
+    fmt   = lambda v: round(float(v), 2) if not pd.isna(v) else None
 
     return jsonify({
         'ticker': ticker,
@@ -333,8 +331,9 @@ def get_chart(ticker):
 
 @app.route('/api/refresh')
 def refresh_cache():
-    """Wymuś odświeżenie cache."""
-    _cache.clear()
+    fund_id = request.args.get('fund', 'tdiv')
+    if fund_id in _cache:
+        del _cache[fund_id]
     return jsonify({'status': 'ok'})
 
 
