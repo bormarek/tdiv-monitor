@@ -52,10 +52,6 @@ tdiv-monitor/
 | Skład funduszu (holdings) | [VanEck – TDIV Holdings](https://www.vaneck.com/pl/pl/investments/dividend-etf/downloads/holdings/) |
 | Ceny akcji | Yahoo Finance via [yfinance](https://github.com/ranaroussi/yfinance) |
 
-## Zrzut ekranu
-
-![TDIV Monitor](https://github.com/bormarek/tdiv-monitor/assets/screenshot.png)
-
 ## Licencja
 
 MIT
