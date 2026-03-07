@@ -285,7 +285,9 @@ def get_info(ticker):
         'website':     info.get('website', ''),
         'employees':   info.get('fullTimeEmployees'),
     }
-    _info_cache[ticker] = {'data': data, 'ts': now}
+    # Cache tylko jeśli udało się pobrać opis (nie zapisuj pustych wyników)
+    if data['description']:
+        _info_cache[ticker] = {'data': data, 'ts': now}
     return jsonify(data)
 
 
