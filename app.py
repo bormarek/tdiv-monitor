@@ -253,6 +253,46 @@ def get_data():
     return jsonify(response)
 
 
+@app.route('/api/chart/<path:ticker>')
+def get_chart(ticker):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=180)  # 6 mies. żeby MA20 miała dane od początku
+
+    try:
+        raw = yf.download(
+            ticker,
+            start=start_date.strftime('%Y-%m-%d'),
+            end=end_date.strftime('%Y-%m-%d'),
+            auto_adjust=True,
+            progress=False,
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    if raw.empty:
+        return jsonify({'error': 'Brak danych dla tego tickera'}), 404
+
+    # Obsługa MultiIndex (yfinance zwraca MultiIndex nawet dla 1 tickera)
+    if isinstance(raw.columns, pd.MultiIndex):
+        close = raw['Close'].iloc[:, 0].dropna()
+    else:
+        close = raw['Close'].dropna()
+
+    ma5  = close.rolling(5).mean()
+    ma20 = close.rolling(20).mean()
+
+    def fmt(v):
+        return round(float(v), 2) if not pd.isna(v) else None
+
+    return jsonify({
+        'ticker': ticker,
+        'dates':  [d.strftime('%Y-%m-%d') for d in close.index],
+        'prices': [fmt(p) for p in close.values],
+        'ma5':    [fmt(v) for v in ma5],
+        'ma20':   [fmt(v) for v in ma20],
+    })
+
+
 @app.route('/api/refresh')
 def refresh_cache():
     """Wymuś odświeżenie cache."""
