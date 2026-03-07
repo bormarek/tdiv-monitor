@@ -304,18 +304,11 @@
       padding: 1.5rem;
       position: relative;
     }
-    .chart-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1rem;
-      gap: 1rem;
-    }
+    .chart-header { margin-bottom: 1rem; }
     .chart-title { font-size: 1rem; font-weight: 700; color: #1a2e45; margin: 0; }
     .chart-subtitle { color: var(--muted); font-size: 0.8rem; margin-top: 0.1rem; }
-    .chart-price-block { text-align: right; }
     .chart-price { font-size: 1.4rem; font-weight: 800; color: #1a2e45; }
-    .chart-change { font-size: 0.82rem; font-weight: 600; margin-top: 0.1rem; }
+    .chart-change { font-size: 0.82rem; font-weight: 600; }
     .chart-close-btn {
       position: absolute; top: 1rem; right: 1rem;
       background: var(--bg); border: 1px solid var(--border);
@@ -389,10 +382,10 @@
       <div>
         <div class="chart-title" id="chart-name"></div>
         <div class="chart-subtitle" id="chart-ticker-label"></div>
-      </div>
-      <div class="chart-price-block">
-        <div class="chart-price" id="chart-price"></div>
-        <div class="chart-change" id="chart-change"></div>
+        <div style="display:flex;align-items:baseline;gap:0.6rem;margin-top:0.35rem;">
+          <div class="chart-price" id="chart-price"></div>
+          <div class="chart-change" id="chart-change"></div>
+        </div>
       </div>
     </div>
     <div id="company-meta" style="display:none;margin-bottom:0.75rem;"></div>
