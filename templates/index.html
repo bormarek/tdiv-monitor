@@ -222,6 +222,33 @@
 
     .empty-row td { text-align: center; color: var(--muted); padding: 2rem; }
 
+    /* CSS tooltip */
+    [data-tip] { position: relative; cursor: help; }
+    [data-tip]::after {
+      content: attr(data-tip);
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1a2e45;
+      color: #e2e8f0;
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px;
+      font-size: 0.75rem;
+      font-weight: 400;
+      width: 260px;
+      white-space: normal;
+      line-height: 1.5;
+      text-transform: none;
+      letter-spacing: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s;
+      z-index: 500;
+      box-shadow: 0 4px 16px rgba(26,46,69,0.18);
+    }
+    [data-tip]:hover::after { opacity: 1; }
+
     /* Wiersze tabeli klikalne */
     tbody tr { cursor: pointer; }
 
@@ -373,8 +400,8 @@
         <th onclick="sortBy('price')">Cena<span class="sort-icon"></span></th>
         <th onclick="sortBy('daily_change_pct')">Zmiana dnia<span class="sort-icon"></span></th>
         <th onclick="sortBy('daily_trend')">Sesja<span class="sort-icon"></span></th>
-        <th onclick="sortBy('ma5')" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="5-dniowa średnia krocząca (MA5) — średnia cen zamknięcia z ostatnich 5 sesji. Wygładza krótkoterminowe wahania kursu.">MA5 &#x24D8;<span class="sort-icon"></span></th>
-        <th onclick="sortBy('ma5_trend')" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Kierunek MA5: czy dzisiejsza 5-dniowa średnia jest wyższa (↑ Rosnący) czy niższa (↓ Spadkowy) niż wczorajsza. Pokazuje krótkoterminowy trend.">Trend 5D &#x24D8;<span class="sort-icon"></span></th>
+        <th onclick="sortBy('ma5')" data-tip="5-dniowa średnia krocząca — średnia cen zamknięcia z ostatnich 5 sesji giełdowych. Wygładza krótkoterminowe wahania kursu.">MA5 &#x24D8;<span class="sort-icon"></span></th>
+        <th onclick="sortBy('ma5_trend')" data-tip="Kierunek MA5: jeśli dzisiejsza 5-dniowa średnia jest wyższa niż wczorajsza → Rosnący. Jeśli niższa → Spadkowy. Pokazuje krótkoterminowy trend.">Trend 5D &#x24D8;<span class="sort-icon"></span></th>
         <th onclick="sortBy('weight')">Udział<span class="sort-icon"></span></th>
       </tr>
     </thead>
@@ -551,11 +578,6 @@
   }
 
   document.getElementById('search').addEventListener('input', renderTable);
-
-  // Inicjalizacja tooltipów Bootstrap
-  document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
-    new bootstrap.Tooltip(el, { trigger: 'hover' });
-  });
 
   // Inicjalizacja
   setFilter('all');
