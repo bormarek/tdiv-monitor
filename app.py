@@ -7,6 +7,7 @@ import io
 from datetime import datetime, timedelta
 import os
 import time
+from deep_translator import GoogleTranslator
 
 app = Flask(__name__)
 
@@ -267,12 +268,20 @@ def get_info(ticker):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+    description_en = info.get('longBusinessSummary', '')
+    description_pl = ''
+    if description_en:
+        try:
+            description_pl = GoogleTranslator(source='en', target='pl').translate(description_en)
+        except Exception:
+            description_pl = description_en  # fallback na angielski
+
     data = {
         'name':        info.get('longName') or info.get('shortName', ''),
         'sector':      info.get('sector', ''),
         'industry':    info.get('industry', ''),
         'country':     info.get('country', ''),
-        'description': info.get('longBusinessSummary', ''),
+        'description': description_pl,
         'website':     info.get('website', ''),
         'employees':   info.get('fullTimeEmployees'),
     }
