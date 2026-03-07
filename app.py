@@ -146,16 +146,25 @@ def parse_swig80(wb):
         if not name or not isin:
             continue
         weight_str = f"{weight * 100:.2f}%".replace('.', ',') if weight else None
+        yf_ticker = POLISH_ISIN_OVERRIDES.get(isin, isin)
         holdings.append({
             'number':     row[0],
             'name':       name,
             'ticker_raw': isin,
-            'ticker':     isin,   # ISIN działa bezpośrednio w yfinance
+            'ticker':     yf_ticker,
             'weight':     weight_str,
             'sector':     sector,
         })
     return holdings
 
+
+# ISINy które yfinance rozwiązuje na giełdę zagraniczną zamiast GPW
+POLISH_ISIN_OVERRIDES = {
+    'PLGPW0000017': 'GPW.WA',    # Giełda Papierów Wartościowych
+    'PLBUDMX00013': 'BDX.WA',    # Budimex
+    'LU2237380790': 'ALE.WA',    # Allegro.eu
+    'AU0000198939': 'GRX.WA',    # GreenX Metals
+}
 
 PARSERS = {'tdiv': parse_tdiv, 'swig80': parse_swig80, 'mwig40': parse_swig80, 'wig20': parse_swig80}
 
