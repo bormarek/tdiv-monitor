@@ -10,6 +10,8 @@ Webowa aplikacja do monitorowania składników funduszu ETF **VanEck Morningstar
 - **Live holdings** — lista składników pobierana automatycznie z VanEck przy każdym odświeżeniu
 - **Fallback** — jeśli VanEck jest niedostępny, aplikacja korzysta z lokalnego pliku `.xlsx`
 - **Cache** — dane rynkowe cachowane przez 15 minut
+- **Wykresy cenowe** — kliknięcie wiersza otwiera interaktywny wykres z liniami ceny, MA5 i MA20
+- **Wybór okresu** — 1M / 3M / 6M na wykresie
 - **Filtrowanie** — po trendzie dziennym i MA5
 - **Wyszukiwarka** — po nazwie spółki lub tickerze
 - **Sortowanie** — po każdej kolumnie tabeli
