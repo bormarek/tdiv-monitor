@@ -16,9 +16,11 @@ VANECK_HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'pl-PL,pl;q=0.9',
 }
-CACHE_TTL = 900  # 15 minut
+CACHE_TTL = 900         # 15 minut
+INFO_CACHE_TTL = 86400  # 24 godziny
 
 _cache = {}
+_info_cache = {}
 
 # Ręczne nadpisania dla tickerów których yfinance nie rozpoznaje po nazwie
 TICKER_OVERRIDES = {
@@ -251,6 +253,31 @@ def get_data():
     _cache['timestamp'] = now
 
     return jsonify(response)
+
+
+@app.route('/api/info/<path:ticker>')
+def get_info(ticker):
+    global _info_cache
+    now = time.time()
+    if ticker in _info_cache and now - _info_cache[ticker].get('ts', 0) < INFO_CACHE_TTL:
+        return jsonify(_info_cache[ticker]['data'])
+
+    try:
+        info = yf.Ticker(ticker).info
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    data = {
+        'name':        info.get('longName') or info.get('shortName', ''),
+        'sector':      info.get('sector', ''),
+        'industry':    info.get('industry', ''),
+        'country':     info.get('country', ''),
+        'description': info.get('longBusinessSummary', ''),
+        'website':     info.get('website', ''),
+        'employees':   info.get('fullTimeEmployees'),
+    }
+    _info_cache[ticker] = {'data': data, 'ts': now}
+    return jsonify(data)
 
 
 @app.route('/api/chart/<path:ticker>')

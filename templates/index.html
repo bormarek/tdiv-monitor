@@ -139,7 +139,6 @@
       background: var(--surface);
       border-radius: 12px;
       border: 1px solid var(--border);
-      overflow: hidden;
       box-shadow: 0 1px 6px rgba(74,127,193,0.07);
     }
     thead th {
@@ -223,8 +222,12 @@
     .empty-row td { text-align: center; color: var(--muted); padding: 2rem; }
 
     /* CSS tooltip */
-    [data-tip] { position: relative; cursor: help; }
-    [data-tip]::after {
+    .tip-wrap {
+      position: relative;
+      cursor: help;
+      display: inline-block;
+    }
+    .tip-wrap::after {
       content: attr(data-tip);
       position: absolute;
       top: calc(100% + 8px);
@@ -247,7 +250,7 @@
       z-index: 500;
       box-shadow: 0 4px 16px rgba(26,46,69,0.18);
     }
-    [data-tip]:hover::after { opacity: 1; }
+    .tip-wrap:hover::after { opacity: 1; }
 
     /* Wiersze tabeli klikalne */
     tbody tr { cursor: pointer; }
@@ -308,6 +311,34 @@
     }
     .legend-item { display: flex; align-items: center; gap: 0.35rem; color: var(--muted); font-weight: 600; }
     .legend-dot { width: 10px; height: 3px; border-radius: 2px; }
+    .meta-tag {
+      display: inline-block;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.2rem 0.6rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+      font-weight: 500;
+      margin-right: 0.4rem;
+      margin-bottom: 0.3rem;
+    }
+    .company-desc-text {
+      font-size: 0.82rem;
+      color: #4a5568;
+      line-height: 1.6;
+      background: var(--bg);
+      border-radius: 8px;
+      padding: 0.65rem 0.85rem;
+      border-left: 3px solid var(--blue);
+    }
+    #desc-toggle {
+      background: none; border: none;
+      color: var(--blue); font-size: 0.78rem;
+      cursor: pointer; padding: 0; margin-top: 0.3rem;
+      font-weight: 600;
+    }
+    #desc-toggle:hover { text-decoration: underline; }
     #chart-loading {
       text-align: center; padding: 3rem; color: var(--muted);
     }
@@ -334,6 +365,8 @@
         <div class="chart-change" id="chart-change"></div>
       </div>
     </div>
+    <div id="company-meta" style="display:none;margin-bottom:0.75rem;"></div>
+    <div id="company-desc" style="display:none;margin-bottom:1rem;"></div>
     <div class="period-btns">
       <button class="period-btn" onclick="setPeriod(30)">1M</button>
       <button class="period-btn active" onclick="setPeriod(90)">3M</button>
@@ -400,8 +433,8 @@
         <th onclick="sortBy('price')">Cena<span class="sort-icon"></span></th>
         <th onclick="sortBy('daily_change_pct')">Zmiana dnia<span class="sort-icon"></span></th>
         <th onclick="sortBy('daily_trend')">Sesja<span class="sort-icon"></span></th>
-        <th onclick="sortBy('ma5')" data-tip="5-dniowa średnia krocząca — średnia cen zamknięcia z ostatnich 5 sesji giełdowych. Wygładza krótkoterminowe wahania kursu.">MA5 &#x24D8;<span class="sort-icon"></span></th>
-        <th onclick="sortBy('ma5_trend')" data-tip="Kierunek MA5: jeśli dzisiejsza 5-dniowa średnia jest wyższa niż wczorajsza → Rosnący. Jeśli niższa → Spadkowy. Pokazuje krótkoterminowy trend.">Trend 5D &#x24D8;<span class="sort-icon"></span></th>
+        <th onclick="sortBy('ma5')"><span class="tip-wrap" data-tip="5-dniowa średnia krocząca — średnia cen zamknięcia z ostatnich 5 sesji giełdowych. Wygładza krótkoterminowe wahania kursu.">MA5 &#x24D8;</span><span class="sort-icon"></span></th>
+        <th onclick="sortBy('ma5_trend')"><span class="tip-wrap" data-tip="Kierunek MA5: jeśli dzisiejsza 5-dniowa średnia jest wyższa niż wczorajsza → Rosnący. Jeśli niższa → Spadkowy. Pokazuje krótkoterminowy trend.">Trend 5D &#x24D8;</span><span class="sort-icon"></span></th>
         <th onclick="sortBy('weight')">Udział<span class="sort-icon"></span></th>
       </tr>
     </thead>
@@ -608,17 +641,49 @@
     document.getElementById('chart-loading').style.display = 'block';
     document.getElementById('chart-error').style.display = 'none';
     document.getElementById('chart-canvas-wrap').style.display = 'none';
+    document.getElementById('company-meta').style.display = 'none';
+    document.getElementById('company-desc').style.display = 'none';
     if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
 
-    fetch('/api/chart/' + encodeURIComponent(yfticker))
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) throw new Error(data.error);
-        chartAllDates  = data.dates;
-        chartAllPrices = data.prices;
-        chartAllMa5    = data.ma5;
-        chartAllMa20   = data.ma20;
+    const chartReq = fetch('/api/chart/' + encodeURIComponent(yfticker)).then(r => r.json());
+    const infoReq  = fetch('/api/info/'  + encodeURIComponent(yfticker)).then(r => r.json());
+
+    Promise.all([chartReq, infoReq])
+      .then(([chartData, infoData]) => {
+        if (chartData.error) throw new Error(chartData.error);
+
+        // Wykres
+        chartAllDates  = chartData.dates;
+        chartAllPrices = chartData.prices;
+        chartAllMa5    = chartData.ma5;
+        chartAllMa20   = chartData.ma20;
         renderChart(activePeriod);
+
+        // Metadane spółki
+        if (!infoData.error) {
+          const metaEl = document.getElementById('company-meta');
+          const tags = [
+            infoData.sector   && `<span class="meta-tag">&#128200; ${infoData.sector}</span>`,
+            infoData.industry && `<span class="meta-tag">&#128165; ${infoData.industry}</span>`,
+            infoData.country  && `<span class="meta-tag">&#127758; ${infoData.country}</span>`,
+            infoData.employees && `<span class="meta-tag">&#128101; ${infoData.employees.toLocaleString()} pracowników</span>`,
+          ].filter(Boolean).join('');
+          if (tags) { metaEl.innerHTML = tags; metaEl.style.display = 'block'; }
+
+          // Opis
+          if (infoData.description) {
+            const short = infoData.description.slice(0, 280);
+            const rest  = infoData.description.slice(280);
+            const descEl = document.getElementById('company-desc');
+            descEl.innerHTML = `
+              <div class="company-desc-text">
+                <span id="desc-short">${short}</span>
+                <span id="desc-rest" style="display:none">${rest}</span>
+                ${rest ? '<br><button id="desc-toggle" onclick="toggleDesc()">Pokaż więcej ▾</button>' : ''}
+              </div>`;
+            descEl.style.display = 'block';
+          }
+        }
       })
       .catch(e => {
         document.getElementById('chart-loading').style.display = 'none';
@@ -728,6 +793,18 @@
 
   function setPeriod(days) {
     if (chartAllDates.length) renderChart(days);
+  }
+
+  function toggleDesc() {
+    const rest = document.getElementById('desc-rest');
+    const btn  = document.getElementById('desc-toggle');
+    if (rest.style.display === 'none') {
+      rest.style.display = 'inline';
+      btn.textContent = 'Pokaż mniej ▴';
+    } else {
+      rest.style.display = 'none';
+      btn.textContent = 'Pokaż więcej ▾';
+    }
   }
 
   function closeChart() {
