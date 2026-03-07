@@ -33,9 +33,25 @@ FUNDS = {
         'short':    'sWIG80',
         'currency': 'PLN',
         'url':      'https://wp00102-api.agiofunds.pl/uploads/funds/Portfolio/archive/PRTF_Beta%20ETF%20sWIG80TR.xlsx',
-        'headers':  {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/121.0 Safari/537.36',
-        },
+        'headers':  {'User-Agent': 'Mozilla/5.0'},
+        'local_fallback': None,
+    },
+    'mwig40': {
+        'id':       'mwig40',
+        'name':     'Beta ETF mWIG40TR',
+        'short':    'mWIG40',
+        'currency': 'PLN',
+        'url':      'https://wp00102-api.agiofunds.pl/uploads/funds/Portfolio/archive/PRTF_Beta%20ETF%20mWIG40TR.xlsx',
+        'headers':  {'User-Agent': 'Mozilla/5.0'},
+        'local_fallback': None,
+    },
+    'wig20': {
+        'id':       'wig20',
+        'name':     'Beta ETF WIG20TR',
+        'short':    'WIG20',
+        'currency': 'PLN',
+        'url':      'https://wp00102-api.agiofunds.pl/uploads/funds/Portfolio/archive/PRTF_Beta%20ETF%20WIG20TR.xlsx',
+        'headers':  {'User-Agent': 'Mozilla/5.0'},
         'local_fallback': None,
     },
 }
@@ -141,7 +157,7 @@ def parse_swig80(wb):
     return holdings
 
 
-PARSERS = {'tdiv': parse_tdiv, 'swig80': parse_swig80}
+PARSERS = {'tdiv': parse_tdiv, 'swig80': parse_swig80, 'mwig40': parse_swig80, 'wig20': parse_swig80}
 
 
 def load_holdings(fund_id):
