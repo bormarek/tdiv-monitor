@@ -9,6 +9,7 @@ import os
 import time
 import sqlite3
 import json
+import threading
 from deep_translator import GoogleTranslator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -17,6 +18,9 @@ app = Flask(__name__)
 # ── Baza danych (cache) ───────────────────────────────────────────────────────
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache.db')
+
+# L1 – pamięć (ultra-szybki odczyt), L2 – SQLite (persystencja)
+_mem_cache: dict = {}  # {(namespace, key): (data, ts)}
 
 
 def init_db():
@@ -30,10 +34,23 @@ def init_db():
                 PRIMARY KEY (namespace, key)
             )
         ''')
+        con.execute('PRAGMA journal_mode=WAL')  # równoległe odczyty podczas zapisu
         con.commit()
 
 
 def cache_get(namespace: str, key: str, ttl: float):
+    mem_key = (namespace, key)
+    now = time.time()
+
+    # L1 – pamięć
+    entry = _mem_cache.get(mem_key)
+    if entry is not None:
+        data, ts = entry
+        if now - ts < ttl:
+            return data
+        del _mem_cache[mem_key]
+
+    # L2 – SQLite
     with sqlite3.connect(DB_PATH) as con:
         row = con.execute(
             'SELECT value, ts FROM cache WHERE namespace=? AND key=?',
@@ -42,21 +59,26 @@ def cache_get(namespace: str, key: str, ttl: float):
     if row is None:
         return None
     value, ts = row
-    if time.time() - ts >= ttl:
+    if now - ts >= ttl:
         return None
-    return json.loads(value)
+    data = json.loads(value)
+    _mem_cache[mem_key] = (data, ts)  # podgrzej L1
+    return data
 
 
 def cache_set(namespace: str, key: str, data) -> None:
+    ts = time.time()
+    _mem_cache[(namespace, key)] = (data, ts)
     with sqlite3.connect(DB_PATH) as con:
         con.execute(
             'INSERT OR REPLACE INTO cache (namespace, key, value, ts) VALUES (?, ?, ?, ?)',
-            (namespace, key, json.dumps(data, default=str), time.time())
+            (namespace, key, json.dumps(data, default=str), ts)
         )
         con.commit()
 
 
 def cache_delete(namespace: str, key: str) -> None:
+    _mem_cache.pop((namespace, key), None)
     with sqlite3.connect(DB_PATH) as con:
         con.execute('DELETE FROM cache WHERE namespace=? AND key=?', (namespace, key))
         con.commit()
@@ -65,6 +87,7 @@ def cache_delete(namespace: str, key: str) -> None:
 init_db()
 
 # ── Konfiguracja funduszy ─────────────────────────────────────────────────────
+# (cache warmer uruchamiany po zdefiniowaniu FUNDS i _build_fund_response)
 
 FUNDS = {
     'tdiv': {
@@ -287,30 +310,19 @@ def get_funds():
     return jsonify(list(FUNDS.values()))
 
 
-@app.route('/api/data')
-def get_data():
-    fund_id = request.args.get('fund', 'tdiv')
-    if fund_id not in FUNDS:
-        return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
-
-    cached = cache_get('fund_data', fund_id, CACHE_TTL)
-    if cached is not None:
-        return jsonify(cached)
-
+def _build_fund_response(fund_id: str) -> dict:
+    """Pobiera dane funduszu z zewnątrz i zwraca gotowy słownik odpowiedzi."""
     holdings, holdings_source = load_holdings(fund_id)
     tickers = [h['ticker'] for h in holdings]
 
     end_date   = datetime.now()
     start_date = end_date - timedelta(days=25)
-    try:
-        raw = yf.download(
-            tickers,
-            start=start_date.strftime('%Y-%m-%d'),
-            end=end_date.strftime('%Y-%m-%d'),
-            auto_adjust=True, progress=False, threads=True,
-        )
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    raw = yf.download(
+        tickers,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        auto_adjust=True, progress=False, threads=True,
+    )
 
     if isinstance(raw.columns, pd.MultiIndex):
         close = raw['Close']
@@ -318,7 +330,6 @@ def get_data():
         close = raw[['Close']]
         close.columns = tickers
 
-    # Supplemental download for tickers dropped by yfinance in large batches
     missing = [t for t in tickers if t not in close.columns]
     if missing:
         try:
@@ -339,12 +350,12 @@ def get_data():
     results = []
     for h in holdings:
         entry = {
-            'number':     h['number'],
-            'name':       h['name'],
-            'ticker':     h['ticker_raw'],
-            'yf_ticker':  h['ticker'],
-            'weight':     h['weight'],
-            'sector':     h.get('sector', ''),
+            'number':    h['number'],
+            'name':      h['name'],
+            'ticker':    h['ticker_raw'],
+            'yf_ticker': h['ticker'],
+            'weight':    h['weight'],
+            'sector':    h.get('sector', ''),
         }
         try:
             series = close[h['ticker']].dropna() if h['ticker'] in close.columns else None
@@ -357,7 +368,7 @@ def get_data():
     up_count   = sum(1 for r in results if r.get('daily_trend') == 'up')
     down_count = sum(1 for r in results if r.get('daily_trend') == 'down')
 
-    response = {
+    return {
         'data':            results,
         'updated_at':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'holdings_source': holdings_source,
@@ -368,6 +379,46 @@ def get_data():
             'unknown': len(results) - up_count - down_count,
         },
     }
+
+
+def _warm_fund_cache():
+    """Odświeża cache wszystkich funduszy w tle (pomija świeże wpisy)."""
+    for fund_id in FUNDS:
+        if cache_get('fund_data', fund_id, CACHE_TTL) is not None:
+            continue
+        try:
+            response = _build_fund_response(fund_id)
+            cache_set('fund_data', fund_id, response)
+        except Exception:
+            pass
+
+
+def _start_cache_warmer():
+    """Uruchamia wątek podgrzewający cache; odświeża co CACHE_TTL - 60 s."""
+    def loop():
+        _warm_fund_cache()           # pierwsze uruchomienie przy starcie
+        while True:
+            time.sleep(CACHE_TTL - 60)
+            _warm_fund_cache()
+    t = threading.Thread(target=loop, daemon=True, name='cache-warmer')
+    t.start()
+
+
+@app.route('/api/data')
+def get_data():
+    fund_id = request.args.get('fund', 'tdiv')
+    if fund_id not in FUNDS:
+        return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
+
+    cached = cache_get('fund_data', fund_id, CACHE_TTL)
+    if cached is not None:
+        return jsonify(cached)
+
+    try:
+        response = _build_fund_response(fund_id)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
     cache_set('fund_data', fund_id, response)
     return jsonify(response)
 
@@ -636,6 +687,8 @@ def refresh_cache():
     cache_delete('fund_data', fund_id)
     return jsonify({'status': 'ok'})
 
+
+_start_cache_warmer()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
