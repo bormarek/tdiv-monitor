@@ -595,15 +595,36 @@ def get_chart(ticker):
     if raw.empty:
         return jsonify({'error': 'Brak danych dla tego tickera'}), 404
 
-    close = raw['Close'].iloc[:, 0].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw['Close'].dropna()
-    ma5   = close.rolling(5).mean()
-    ma20  = close.rolling(20).mean()
-    fmt   = lambda v: round(float(v), 2) if not pd.isna(v) else None
+    def col(name):
+        return raw[name].iloc[:, 0] if isinstance(raw.columns, pd.MultiIndex) else raw[name]
+
+    close  = col('Close')
+    open_  = col('Open')
+    high   = col('High')
+    low    = col('Low')
+    volume = col('Volume')
+
+    # Wyrównaj indeks do dni gdy close nie jest NaN
+    idx   = close.dropna().index
+    close = close.loc[idx]
+    open_ = open_.loc[idx]
+    high  = high.loc[idx]
+    low   = low.loc[idx]
+    volume = volume.loc[idx]
+
+    ma5  = close.rolling(5).mean()
+    ma20 = close.rolling(20).mean()
+    fmt  = lambda v: round(float(v), 2) if not pd.isna(v) else None
+    fmtv = lambda v: int(v) if not pd.isna(v) else None
 
     return jsonify({
         'ticker': ticker,
-        'dates':  [d.strftime('%Y-%m-%d') for d in close.index],
+        'dates':  [d.strftime('%Y-%m-%d') for d in idx],
         'prices': [fmt(p) for p in close.values],
+        'open':   [fmt(v) for v in open_.values],
+        'high':   [fmt(v) for v in high.values],
+        'low':    [fmt(v) for v in low.values],
+        'volume': [fmtv(v) for v in volume.values],
         'ma5':    [fmt(v) for v in ma5],
         'ma20':   [fmt(v) for v in ma20],
     })
