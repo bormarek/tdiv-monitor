@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import os
 import time
 from deep_translator import GoogleTranslator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
@@ -446,6 +447,95 @@ def get_calendar(ticker):
     if result['earnings'] or result['dividends'] or result['news']:
         _calendar_cache[ticker] = {'data': result, 'ts': now}
 
+    return jsonify(result)
+
+
+_market_cal_cache = {}
+MARKET_CAL_TTL = 3600  # 1 godzina
+
+
+@app.route('/api/market-calendar')
+def get_market_calendar():
+    fund_id = request.args.get('fund', 'swig80')
+    if fund_id not in FUNDS:
+        return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
+
+    global _market_cal_cache
+    now = time.time()
+    if fund_id in _market_cal_cache and now - _market_cal_cache[fund_id].get('ts', 0) < MARKET_CAL_TTL:
+        return jsonify(_market_cal_cache[fund_id]['data'])
+
+    holdings, _ = load_holdings(fund_id)
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    def fetch_one(holding):
+        ticker = holding['ticker']
+        name   = holding['name']
+        events = []
+        try:
+            t = yf.Ticker(ticker)
+            # Nadchodzące raporty wynikowe
+            try:
+                ed = t.get_earnings_dates(limit=6)
+                if ed is not None and not ed.empty:
+                    for date, row in ed.iterrows():
+                        reported = _safe_float(row.get('Reported EPS'))
+                        estimate = _safe_float(row.get('EPS Estimate'))
+                        surprise = _safe_float(row.get('Surprise(%)'))
+                        if surprise is not None:
+                            surprise = round(surprise, 2)
+                        events.append({
+                            'type':     'earnings',
+                            'date':     date.strftime('%Y-%m-%d'),
+                            'name':     name,
+                            'ticker':   ticker,
+                            'estimate': estimate,
+                            'reported': reported,
+                            'surprise': surprise,
+                        })
+            except Exception:
+                pass
+            # Dywidendy
+            try:
+                divs = t.dividends
+                if divs is not None and not divs.empty:
+                    for d, v in zip(divs.tail(6).index, divs.tail(6).values):
+                        events.append({
+                            'type':   'dividend',
+                            'date':   str(d.date()),
+                            'name':   name,
+                            'ticker': ticker,
+                            'amount': round(float(v), 4),
+                        })
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return events
+
+    all_events = []
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures = {executor.submit(fetch_one, h): h for h in holdings}
+        for f in as_completed(futures):
+            all_events.extend(f.result())
+
+    upcoming = sorted(
+        [e for e in all_events if e['date'] >= today_str],
+        key=lambda x: x['date'],
+    )
+    recent = sorted(
+        [e for e in all_events if e['date'] < today_str],
+        key=lambda x: x['date'],
+        reverse=True,
+    )
+
+    result = {
+        'upcoming': upcoming[:50],
+        'recent':   recent[:40],
+        'fund':     FUNDS[fund_id],
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    _market_cal_cache[fund_id] = {'data': result, 'ts': now}
     return jsonify(result)
 
 

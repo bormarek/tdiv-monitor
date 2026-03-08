@@ -398,6 +398,67 @@
     .news-item a { color: var(--text); text-decoration: none; font-weight: 500; font-size: 0.82rem; line-height: 1.4; }
     .news-item a:hover { color: var(--blue); text-decoration: underline; }
     .news-meta { color: var(--muted); font-size: 0.72rem; margin-top: 0.1rem; }
+
+    /* Widok kalendarza giełdowego */
+    #market-calendar-view { padding: 1rem 1.5rem 2rem; }
+    .mcal-section { margin-bottom: 2rem; }
+    .mcal-section-title {
+      font-size: 0.75rem; font-weight: 700; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 0.75rem; padding-bottom: 0.4rem;
+      border-bottom: 2px solid var(--border);
+    }
+    .mcal-grid { display: flex; flex-direction: column; gap: 0.4rem; }
+    .mcal-event {
+      display: grid;
+      grid-template-columns: 90px 1fr auto;
+      align-items: center;
+      gap: 0.75rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.55rem 0.85rem;
+      transition: box-shadow 0.15s;
+    }
+    .mcal-event:hover { box-shadow: 0 2px 10px rgba(74,127,193,0.1); }
+    .mcal-date {
+      font-size: 0.78rem; font-weight: 700; color: var(--blue);
+      white-space: nowrap;
+    }
+    .mcal-date.past { color: var(--muted); }
+    .mcal-date.today { color: var(--green); }
+    .mcal-date.soon { color: var(--yellow); }
+    .mcal-info { min-width: 0; }
+    .mcal-company { font-weight: 600; font-size: 0.85rem; color: #1a2e45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mcal-ticker { font-size: 0.72rem; color: var(--muted); font-family: monospace; }
+    .mcal-badge {
+      font-size: 0.72rem; font-weight: 700; padding: 0.2rem 0.55rem;
+      border-radius: 6px; white-space: nowrap;
+    }
+    .mcal-badge-earnings { background: var(--blue-bg); color: var(--blue); }
+    .mcal-badge-earnings-past { background: #f0f4f8; color: var(--muted); }
+    .mcal-badge-div { background: var(--green-bg); color: var(--green); }
+    .mcal-badge-div-past { background: #f0f4f8; color: var(--muted); }
+    .mcal-surprise-pos { color: var(--green); font-weight: 700; }
+    .mcal-surprise-neg { color: var(--red); font-weight: 700; }
+    .mcal-empty { color: var(--muted); font-size: 0.85rem; padding: 1.5rem 0; text-align: center; }
+    .mcal-loading { text-align: center; padding: 3rem; color: var(--muted); font-size: 0.9rem; }
+    .mcal-links {
+      margin-top: 1rem; padding: 0.75rem 1rem;
+      background: var(--blue-bg); border-radius: 10px; border: 1px solid var(--blue);
+      font-size: 0.8rem;
+    }
+    .mcal-links a { color: var(--blue); text-decoration: none; font-weight: 600; margin-right: 1.25rem; }
+    .mcal-links a:hover { text-decoration: underline; }
+    .mcal-refresh-note { color: var(--muted); font-size: 0.72rem; margin-top: 0.5rem; }
+    .view-toggle-btn {
+      background: var(--bg); border: 1px solid var(--border);
+      color: var(--muted); border-radius: 8px;
+      padding: 0.4rem 0.8rem; font-size: 0.8rem;
+      cursor: pointer; transition: all 0.15s; font-weight: 600;
+    }
+    .view-toggle-btn:hover { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); }
+    .view-toggle-btn.active { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); }
   </style>
 </head>
 <body>
@@ -471,6 +532,7 @@
   <button class="filter-btn" id="filter-down" onclick="setFilter('down')">&#x25BC; Spadek</button>
   <button class="filter-btn" id="filter-ma5up" onclick="setFilter('ma5up')">MA5 &#x25B2;</button>
   <button class="filter-btn" id="filter-ma5down" onclick="setFilter('ma5down')">MA5 &#x25BC;</button>
+  <button class="view-toggle-btn" id="view-calendar-btn" onclick="toggleCalendarView()">&#128197; Kalendarz</button>
   <button class="refresh-btn" id="refresh-btn" onclick="forceRefresh()">
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
       <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
@@ -481,7 +543,28 @@
   <span style="color:var(--muted);font-size:0.75rem;" id="count-info"></span>
 </div>
 
-<div class="table-wrap">
+<div id="market-calendar-view" style="display:none">
+  <div class="mcal-loading" id="mcal-loading">Pobieranie kalendarza&hellip; (może potrwać chwilę)</div>
+  <div id="mcal-content" style="display:none">
+    <div class="mcal-links">
+      &#128279; Zewnętrzne źródła:
+      <a href="https://www.stockwatch.pl/kalendarium/" target="_blank" rel="noopener">StockWatch – Kalendarium</a>
+      <a href="https://strefainwestorow.pl/dane/raporty/lista-publikacji-raportow-okresowych/swig80" target="_blank" rel="noopener">StrefaInwestorów – Raporty</a>
+      <a href="https://strefainwestorow.pl/dane/dywidendy/2026" target="_blank" rel="noopener">Dywidendy 2026</a>
+      <div class="mcal-refresh-note" id="mcal-generated"></div>
+    </div>
+    <div id="mcal-upcoming-section" class="mcal-section" style="margin-top:1.25rem">
+      <div class="mcal-section-title">Nadchodzące wydarzenia</div>
+      <div class="mcal-grid" id="mcal-upcoming"></div>
+    </div>
+    <div id="mcal-recent-section" class="mcal-section">
+      <div class="mcal-section-title">Ostatnie wydarzenia</div>
+      <div class="mcal-grid" id="mcal-recent"></div>
+    </div>
+  </div>
+</div>
+
+<div class="table-wrap" id="table-wrap">
   <table id="data-table">
     <thead>
       <tr>
@@ -508,6 +591,7 @@
   let currentSort = { key: 'number', dir: 'asc' };
   let currentFund = 'tdiv';
   let fundsConfig = [];
+  let calendarView = false;
 
   function trendBadge(trend, label) {
     if (trend === 'up') return `<span class="trend-badge trend-up">&#x25B2; ${label}</span>`;
@@ -678,7 +762,11 @@
     document.querySelectorAll('.fund-tab').forEach(t => {
       t.classList.toggle('active', t.dataset.fund === fundId);
     });
-    loadData(false);
+    if (calendarView) {
+      loadMarketCalendar();
+    } else {
+      loadData(false);
+    }
   }
 
   async function initFunds() {
@@ -695,6 +783,112 @@
 
   document.getElementById('search').addEventListener('input', renderTable);
 
+  // ---- Kalendarz giełdowy ----
+  let _mcalLoaded = {};  // fund_id -> bool
+
+  function toggleCalendarView() {
+    calendarView = !calendarView;
+    const btn = document.getElementById('view-calendar-btn');
+    const tableWrap = document.getElementById('table-wrap');
+    const calView   = document.getElementById('market-calendar-view');
+    if (calendarView) {
+      btn.classList.add('active');
+      tableWrap.style.display = 'none';
+      calView.style.display   = 'block';
+      if (!_mcalLoaded[currentFund]) loadMarketCalendar();
+    } else {
+      btn.classList.remove('active');
+      tableWrap.style.display = 'block';
+      calView.style.display   = 'none';
+    }
+  }
+
+  async function loadMarketCalendar() {
+    document.getElementById('mcal-loading').style.display = 'block';
+    document.getElementById('mcal-content').style.display = 'none';
+    try {
+      const resp = await fetch('/api/market-calendar?fund=' + currentFund);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      renderMarketCalendar(data);
+      _mcalLoaded[currentFund] = true;
+    } catch(e) {
+      document.getElementById('mcal-loading').textContent = 'Błąd pobierania kalendarza: ' + e.message;
+    }
+  }
+
+  function mcalDateClass(dateStr) {
+    const today = new Date().toISOString().slice(0, 10);
+    const diff  = Math.round((new Date(dateStr) - new Date(today)) / 86400000);
+    if (dateStr < today) return 'past';
+    if (dateStr === today) return 'today';
+    if (diff <= 7) return 'soon';
+    return '';
+  }
+
+  function renderMcalEvent(e, isPast) {
+    const dcls = mcalDateClass(e.date);
+    if (e.type === 'earnings') {
+      const badgeCls = isPast ? 'mcal-badge-earnings-past' : 'mcal-badge-earnings';
+      let detail = '';
+      if (isPast && e.reported != null) {
+        const sc = e.surprise > 0 ? 'mcal-surprise-pos' : e.surprise < 0 ? 'mcal-surprise-neg' : '';
+        const sp = e.surprise != null ? ` <span class="${sc}">(${e.surprise > 0 ? '+' : ''}${e.surprise}%)</span>` : '';
+        detail = `EPS: ${e.reported}${sp}`;
+      } else if (!isPast && e.estimate != null) {
+        detail = `Prognoza EPS: ${e.estimate}`;
+      }
+      return `<div class="mcal-event">
+        <div class="mcal-date ${dcls}">${e.date}</div>
+        <div class="mcal-info">
+          <div class="mcal-company">${e.name}</div>
+          <div class="mcal-ticker">${e.ticker}${detail ? ' · ' + detail : ''}</div>
+        </div>
+        <div class="mcal-badge ${badgeCls}">Raport</div>
+      </div>`;
+    } else {
+      const badgeCls = isPast ? 'mcal-badge-div-past' : 'mcal-badge-div';
+      return `<div class="mcal-event">
+        <div class="mcal-date ${dcls}">${e.date}</div>
+        <div class="mcal-info">
+          <div class="mcal-company">${e.name}</div>
+          <div class="mcal-ticker">${e.ticker}</div>
+        </div>
+        <div class="mcal-badge ${badgeCls}">Dywidenda ${e.amount}</div>
+      </div>`;
+    }
+  }
+
+  function renderMarketCalendar(data) {
+    const upEl   = document.getElementById('mcal-upcoming');
+    const recEl  = document.getElementById('mcal-recent');
+    const upSec  = document.getElementById('mcal-upcoming-section');
+    const recSec = document.getElementById('mcal-recent-section');
+
+    if (data.upcoming?.length) {
+      upEl.innerHTML  = data.upcoming.map(e => renderMcalEvent(e, false)).join('');
+      upSec.style.display = 'block';
+    } else {
+      upSec.style.display = 'none';
+    }
+
+    if (data.recent?.length) {
+      recEl.innerHTML  = data.recent.map(e => renderMcalEvent(e, true)).join('');
+      recSec.style.display = 'block';
+    } else {
+      recSec.style.display = 'none';
+    }
+
+    if (!data.upcoming?.length && !data.recent?.length) {
+      upEl.innerHTML = '<div class="mcal-empty">Brak danych kalendarzowych dla tego funduszu w yfinance.<br>Skorzystaj z zewnętrznych źródeł powyżej.</div>';
+      upSec.style.display = 'block';
+    }
+
+    document.getElementById('mcal-generated').textContent = 'Pobrano: ' + (data.generated_at || '');
+    document.getElementById('mcal-loading').style.display = 'none';
+    document.getElementById('mcal-content').style.display = 'block';
+  }
 
   // Inicjalizacja
   setFilter('all');
