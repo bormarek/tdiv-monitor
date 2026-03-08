@@ -143,7 +143,7 @@ def parse_swig80(wb):
         isin    = row[2]
         sector  = row[3] or ''
         weight  = row[6]  # ułamek dziesiętny, np. 0.044
-        if not name or not isin:
+        if not name or not isin or isin == '---' or not isin.replace('-', '').isalnum() or str(isin).startswith('PL0'):
             continue
         weight_str = f"{weight * 100:.2f}%".replace('.', ',') if weight else None
         yf_ticker = POLISH_ISIN_OVERRIDES.get(isin, isin)
@@ -158,12 +158,25 @@ def parse_swig80(wb):
     return holdings
 
 
-# ISINy które yfinance rozwiązuje na giełdę zagraniczną zamiast GPW
+# ISINy które yfinance rozwiązuje na giełdę zagraniczną zamiast GPW (.WA)
 POLISH_ISIN_OVERRIDES = {
-    'PLGPW0000017': 'GPW.WA',    # Giełda Papierów Wartościowych
-    'PLBUDMX00013': 'BDX.WA',    # Budimex
+    # Zagraniczne ISINy spółek notowanych na GPW
     'LU2237380790': 'ALE.WA',    # Allegro.eu
     'AU0000198939': 'GRX.WA',    # GreenX Metals
+    # Polskie ISINy trafiające na Stuttgart (EUR) zamiast GPW (PLN)
+    'PLAMBRA00013': 'AMB.WA',    # Ambra
+    'PLBMDLB00018': 'BIO.WA',    # Biomed-Lublin
+    'PLBUDMX00013': 'BDX.WA',    # Budimex
+    'PLCMPLD00016': 'SGN.WA',    # Sygnity
+    'PLCPTRT00014': 'CTX.WA',    # Captor Therapeutics
+    'PLDADEL00013': 'DAD.WA',    # Dadelo
+    'PLECHPS00019': 'ECH.WA',    # Echo Investment
+    'PLERBUD00012': 'ERB.WA',    # Erbud
+    'PLGPW0000017': 'GPW.WA',    # Giełda Papierów Wartościowych
+    'PLLVTSF00010': 'TXT.WA',    # Text SA
+    'PLOPNPL00013': 'OPN.WA',    # Oponeo.pl
+    'PLSTLEX00019': 'STX.WA',    # Stalexport Autostrady
+    'PLTOYA000011': 'TOA.WA',    # TOYA
 }
 
 PARSERS = {'tdiv': parse_tdiv, 'swig80': parse_swig80, 'mwig40': parse_swig80, 'wig20': parse_swig80}
@@ -254,6 +267,24 @@ def get_data():
         close = raw[['Close']]
         close.columns = tickers
 
+    # Supplemental download for tickers dropped by yfinance in large batches
+    missing = [t for t in tickers if t not in close.columns]
+    if missing:
+        try:
+            raw2 = yf.download(
+                missing,
+                start=start_date.strftime('%Y-%m-%d'),
+                end=end_date.strftime('%Y-%m-%d'),
+                auto_adjust=True, progress=False, threads=True,
+            )
+            if not raw2.empty:
+                close2 = raw2['Close'] if isinstance(raw2.columns, pd.MultiIndex) else raw2[['Close']]
+                if not isinstance(raw2.columns, pd.MultiIndex):
+                    close2.columns = missing
+                close = close.join(close2, how='outer')
+        except Exception:
+            pass
+
     results = []
     for h in holdings:
         entry = {
@@ -321,6 +352,101 @@ def get_info(ticker):
     if data['description']:
         _info_cache[ticker] = {'data': data, 'ts': now}
     return jsonify(data)
+
+
+_calendar_cache = {}
+CALENDAR_CACHE_TTL = 3600  # 1 godzina
+
+
+def _safe_float(v):
+    try:
+        f = float(v)
+        return None if pd.isna(f) else round(f, 4)
+    except Exception:
+        return None
+
+
+@app.route('/api/calendar/<path:ticker>')
+def get_calendar(ticker):
+    global _calendar_cache
+    now = time.time()
+    if ticker in _calendar_cache and now - _calendar_cache[ticker].get('ts', 0) < CALENDAR_CACHE_TTL:
+        return jsonify(_calendar_cache[ticker]['data'])
+
+    t = yf.Ticker(ticker)
+    result = {'earnings': [], 'dividends': [], 'news': []}
+
+    try:
+        ed = t.get_earnings_dates(limit=8)
+        if ed is not None and not ed.empty:
+            for date, row in ed.iterrows():
+                reported = _safe_float(row.get('Reported EPS'))
+                estimate = _safe_float(row.get('EPS Estimate'))
+                surprise = _safe_float(row.get('Surprise(%)'))
+                if surprise is not None:
+                    surprise = round(surprise, 2)
+                result['earnings'].append({
+                    'date':     date.strftime('%Y-%m-%d'),
+                    'reported': reported,
+                    'estimate': estimate,
+                    'surprise': surprise,
+                })
+    except Exception:
+        pass
+
+    try:
+        divs = t.dividends
+        if divs is not None and not divs.empty:
+            recent = divs.tail(6).iloc[::-1]
+            result['dividends'] = [
+                {'date': str(d.date()), 'amount': round(float(v), 4)}
+                for d, v in zip(recent.index, recent.values)
+            ]
+    except Exception:
+        pass
+
+    try:
+        news_list = t.news or []
+        for n in news_list[:6]:
+            c = n.get('content', n)  # nowy format: {id, content:{...}}, stary: płaski
+            title = c.get('title', '')
+            publisher = (c.get('provider') or {}).get('displayName', '') or c.get('publisher', '')
+            url = ((c.get('clickThroughUrl') or {}).get('url', '')
+                   or (c.get('canonicalUrl') or {}).get('url', '')
+                   or c.get('link', ''))
+            pub_date = c.get('pubDate', '') or c.get('displayTime', '')
+            if pub_date:
+                date_str = pub_date[:10]  # ISO format YYYY-MM-DD
+            else:
+                ts = c.get('providerPublishTime', 0)
+                date_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d') if ts else ''
+            if title:
+                result['news'].append({
+                    'title':     title,
+                    'publisher': publisher,
+                    'url':       url,
+                    'date':      date_str,
+                })
+    except Exception:
+        pass
+
+    # Tłumaczenie newsów dla polskich spółek
+    if ticker.upper().endswith('.WA') and result['news']:
+        try:
+            SEP = '\n<|||>\n'
+            combined = SEP.join(n['title'] for n in result['news'])
+            translated = GoogleTranslator(source='en', target='pl').translate(combined)
+            parts = translated.split(SEP)
+            for i, n in enumerate(result['news']):
+                if i < len(parts) and parts[i].strip():
+                    n['title'] = parts[i].strip()
+        except Exception:
+            pass
+
+    if result['earnings'] or result['dividends'] or result['news']:
+        _calendar_cache[ticker] = {'data': result, 'ts': now}
+
+    return jsonify(result)
 
 
 @app.route('/api/chart/<path:ticker>')

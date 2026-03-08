@@ -118,9 +118,9 @@
       color: var(--text);
       border-radius: 8px;
       padding: 0.4rem 0.75rem;
-      width: 220px;
       font-size: 0.85rem;
     }
+    .toolbar input[type=search] { width: 220px; }
     .toolbar input[type=search]::placeholder { color: var(--muted); }
     .toolbar input[type=search]:focus { outline: none; border-color: var(--blue); background: #fff; }
 
@@ -370,6 +370,34 @@
       display: none;
     }
     .chart-canvas-wrap { position: relative; height: 320px; }
+    .chart-card { max-height: 90vh; overflow-y: auto; }
+
+    /* Harmonogram inwestora */
+    .cal-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+    .cal-block { margin-bottom: 1rem; }
+    .cal-title {
+      font-weight: 700; font-size: 0.72rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem;
+    }
+    .next-earnings {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      background: var(--blue-bg); border: 1px solid var(--blue);
+      border-radius: 8px; padding: 0.35rem 0.75rem;
+      font-size: 0.82rem; color: var(--blue); font-weight: 600; margin-bottom: 0.5rem;
+    }
+    .cal-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .cal-table th {
+      color: var(--muted); font-weight: 600; font-size: 0.7rem;
+      text-transform: uppercase; padding: 0.25rem 0.5rem;
+      border-bottom: 1px solid var(--border); text-align: left;
+    }
+    .cal-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--bg); }
+    .cal-table tr:last-child td { border-bottom: none; }
+    .news-item { padding: 0.45rem 0; border-bottom: 1px solid var(--bg); }
+    .news-item:last-child { border-bottom: none; }
+    .news-item a { color: var(--text); text-decoration: none; font-weight: 500; font-size: 0.82rem; line-height: 1.4; }
+    .news-item a:hover { color: var(--blue); text-decoration: underline; }
+    .news-meta { color: var(--muted); font-size: 0.72rem; margin-top: 0.1rem; }
   </style>
 </head>
 <body>
@@ -404,6 +432,9 @@
     <div id="chart-error"></div>
     <div class="chart-canvas-wrap" id="chart-canvas-wrap" style="display:none">
       <canvas id="price-chart"></canvas>
+    </div>
+    <div id="calendar-section" class="cal-section" style="display:none">
+      <div id="calendar-content"></div>
     </div>
   </div>
 </div>
@@ -664,6 +695,7 @@
 
   document.getElementById('search').addEventListener('input', renderTable);
 
+
   // Inicjalizacja
   setFilter('all');
   initFunds().then(() => loadData());
@@ -695,13 +727,15 @@
     document.getElementById('chart-canvas-wrap').style.display = 'none';
     document.getElementById('company-meta').style.display = 'none';
     document.getElementById('company-desc').style.display = 'none';
+    document.getElementById('calendar-section').style.display = 'none';
     if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
 
-    const chartReq = fetch('/api/chart/' + encodeURIComponent(yfticker)).then(r => r.json());
-    const infoReq  = fetch('/api/info/'  + encodeURIComponent(yfticker)).then(r => r.json());
+    const chartReq    = fetch('/api/chart/'    + encodeURIComponent(yfticker)).then(r => r.json());
+    const infoReq     = fetch('/api/info/'     + encodeURIComponent(yfticker)).then(r => r.json());
+    const calendarReq = fetch('/api/calendar/' + encodeURIComponent(yfticker)).then(r => r.json());
 
-    Promise.all([chartReq, infoReq])
-      .then(([chartData, infoData]) => {
+    Promise.all([chartReq, infoReq, calendarReq])
+      .then(([chartData, infoData, calData]) => {
         if (chartData.error) throw new Error(chartData.error);
 
         // Wykres
@@ -736,6 +770,8 @@
             descEl.style.display = 'block';
           }
         }
+
+        renderCalendar(calData);
       })
       .catch(e => {
         document.getElementById('chart-loading').style.display = 'none';
@@ -743,6 +779,63 @@
         errEl.textContent = 'Błąd: ' + e.message;
         errEl.style.display = 'block';
       });
+  }
+
+  function renderCalendar(data) {
+    const section = document.getElementById('calendar-section');
+    const content = document.getElementById('calendar-content');
+    const hasData = (data.earnings?.length || data.dividends?.length || data.news?.length);
+    if (!hasData || data.error) { section.style.display = 'none'; return; }
+
+    let html = '';
+
+    if (data.earnings?.length) {
+      const future = data.earnings.filter(e => e.reported === null && e.estimate !== null);
+      const past   = data.earnings.filter(e => e.reported !== null);
+      html += '<div class="cal-block"><div class="cal-title">Wyniki finansowe (EPS)</div>';
+      if (future.length) {
+        html += `<div class="next-earnings">📅 Najbliższy raport: <strong>${future[0].date}</strong></div>`;
+      }
+      if (past.length) {
+        html += `<table class="cal-table">
+          <tr><th>Data</th><th>EPS prognoza</th><th>EPS raport</th><th>Niespodzianka</th></tr>
+          ${past.slice(0, 4).map(e => {
+            const sc = e.surprise > 0 ? 'var(--green)' : e.surprise < 0 ? 'var(--red)' : 'var(--muted)';
+            const sp = e.surprise != null ? (e.surprise > 0 ? '+' : '') + e.surprise + '%' : '—';
+            return `<tr>
+              <td>${e.date}</td>
+              <td style="color:var(--muted)">${e.estimate != null ? e.estimate : '—'}</td>
+              <td style="font-weight:600">${e.reported != null ? e.reported : '—'}</td>
+              <td style="color:${sc};font-weight:600">${sp}</td>
+            </tr>`;
+          }).join('')}
+        </table>`;
+      }
+      html += '</div>';
+    }
+
+    if (data.dividends?.length) {
+      html += '<div class="cal-block"><div class="cal-title">Historia dywidend</div>';
+      html += `<table class="cal-table">
+        <tr><th>Data ex-div</th><th>Kwota</th></tr>
+        ${data.dividends.slice(0, 5).map(d =>
+          `<tr><td>${d.date}</td><td style="font-weight:600">${d.amount}</td></tr>`
+        ).join('')}
+      </table></div>`;
+    }
+
+    if (data.news?.length) {
+      html += '<div class="cal-block"><div class="cal-title">Aktualności</div>';
+      html += data.news.map(n => `
+        <div class="news-item">
+          <a href="${n.url}" target="_blank" rel="noopener noreferrer">${n.title}</a>
+          <div class="news-meta">${n.publisher}${n.date ? ' · ' + n.date : ''}</div>
+        </div>`).join('');
+      html += '</div>';
+    }
+
+    content.innerHTML = html;
+    section.style.display = 'block';
   }
 
   function renderChart(days) {
