@@ -83,6 +83,53 @@
     .fund-tab .fund-short { font-size: 0.9rem; font-weight: 800; }
     .fund-tab .fund-long  { font-size: 0.68rem; opacity: 0.8; white-space: nowrap; }
     .fund-tab.active .fund-long { opacity: 0.85; }
+    .fund-tab.upload-tab { border-style: dashed; border-color: var(--blue); color: var(--blue); margin-left: auto; }
+    .fund-tab.upload-tab.active { border-style: solid; background: var(--blue); color: #fff; }
+    #upload-zone {
+      display: none;
+      padding: 2rem 1.5rem;
+    }
+    #drop-area {
+      border: 2px dashed var(--border);
+      border-radius: 16px;
+      background: var(--surface);
+      padding: 3rem 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+    #drop-area.drag-over { border-color: var(--blue); background: var(--blue-bg); }
+    #drop-area .drop-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+    #drop-area .drop-title { font-size: 1rem; font-weight: 700; color: var(--text); margin-bottom: 0.4rem; }
+    #drop-area .drop-sub { font-size: 0.8rem; color: var(--muted); margin-bottom: 1.25rem; }
+    #drop-area .drop-formats { font-size: 0.72rem; color: var(--muted); margin-top: 0.75rem; }
+    .upload-btn {
+      background: var(--blue);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.55rem 1.4rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .upload-btn:hover { opacity: 0.88; }
+    #upload-error { color: var(--red); font-size: 0.83rem; margin-top: 1rem; display:none; }
+    #upload-loading { color: var(--muted); font-size: 0.83rem; margin-top: 1rem; display:none; }
+    #upload-result-bar {
+      display: none;
+      padding: 0.6rem 1.5rem;
+      background: var(--blue-bg);
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--blue);
+      display: none;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    #upload-result-bar button { background: none; border: 1px solid var(--blue); color: var(--blue); border-radius: 6px; padding: 0.2rem 0.7rem; cursor: pointer; font-size: 0.75rem; }
     .header-right {
       margin-left: auto;
       display: flex;
@@ -539,6 +586,29 @@
 
 <div id="error-bar" role="alert"></div>
 
+<!-- Strefa uploadu własnego pliku -->
+<div id="upload-zone">
+  <div id="drop-area" onclick="document.getElementById('file-input').click()"
+       ondragover="event.preventDefault();this.classList.add('drag-over')"
+       ondragleave="this.classList.remove('drag-over')"
+       ondrop="handleDrop(event)">
+    <div class="drop-icon">&#128194;</div>
+    <div class="drop-title">Wgraj plik z holdingami</div>
+    <div class="drop-sub">Przeciągnij i upuść plik lub kliknij, aby wybrać</div>
+    <button class="upload-btn" onclick="event.stopPropagation();document.getElementById('file-input').click()">Wybierz plik</button>
+    <input type="file" id="file-input" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFileInput(this)">
+    <div class="drop-formats">Obsługiwane formaty: Excel (.xlsx, .xls) &middot; CSV &middot; BlackRock &middot; Vanguard &middot; iShares</div>
+    <div id="upload-error"></div>
+    <div id="upload-loading">&#9203; Pobieranie cen z Yahoo Finance&hellip;</div>
+  </div>
+</div>
+
+<!-- Pasek informacyjny po wgraniu pliku -->
+<div id="upload-result-bar">
+  <span id="upload-filename"></span>
+  <button onclick="clearUpload()">&#x2715; Wyczyść</button>
+</div>
+
 <div class="toolbar">
   <input type="search" id="search" placeholder="Szukaj spółki lub tickera&hellip;" />
   <button class="filter-btn" id="filter-all" onclick="setFilter('all')">Wszystkie</button>
@@ -776,11 +846,90 @@
     document.querySelectorAll('.fund-tab').forEach(t => {
       t.classList.toggle('active', t.dataset.fund === fundId);
     });
-    if (calendarView) {
-      loadMarketCalendar();
+    if (fundId === 'upload') {
+      _showUploadView();
     } else {
-      loadData(false);
+      _hideUploadView();
+      if (calendarView) {
+        loadMarketCalendar();
+      } else {
+        loadData(false);
+      }
     }
+  }
+
+  function _showUploadView() {
+    document.getElementById('upload-zone').style.display = 'block';
+    document.querySelector('.toolbar').style.display = 'none';
+    document.getElementById('table-wrap').style.display = 'none';
+    document.getElementById('market-calendar-view').style.display = 'none';
+  }
+
+  function _hideUploadView() {
+    document.getElementById('upload-zone').style.display = 'none';
+    document.getElementById('upload-result-bar').style.display = 'none';
+    document.querySelector('.toolbar').style.display = '';
+    document.getElementById('table-wrap').style.display = '';
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    document.getElementById('drop-area').classList.remove('drag-over');
+    const file = event.dataTransfer.files[0];
+    if (file) processUpload(file);
+  }
+
+  function handleFileInput(input) {
+    if (input.files[0]) processUpload(input.files[0]);
+  }
+
+  async function processUpload(file) {
+    const errEl  = document.getElementById('upload-error');
+    const loadEl = document.getElementById('upload-loading');
+    errEl.style.display  = 'none';
+    loadEl.style.display = 'block';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+      const json = await resp.json();
+      if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
+
+      allData = json.data;
+      document.getElementById('fund-subtitle').textContent = json.fund?.name || '';
+      document.getElementById('stat-up').innerHTML   = `&#x25B2; ${json.summary.up}`;
+      document.getElementById('stat-down').innerHTML = `&#x25BC; ${json.summary.down}`;
+      document.getElementById('stat-unk').innerHTML  = `&#x3F; ${json.summary.unknown}`;
+      document.getElementById('update-time').textContent = `Aktualizacja: ${json.updated_at}`;
+      document.getElementById('source-badge').innerHTML = '';
+
+      // Ukryj upload zone, pokaż tabelę
+      document.getElementById('upload-zone').style.display = 'none';
+      const bar = document.getElementById('upload-result-bar');
+      document.getElementById('upload-filename').textContent = '&#128194; ' + file.name;
+      bar.style.display = 'flex';
+      document.querySelector('.toolbar').style.display = '';
+      document.getElementById('table-wrap').style.display = '';
+      setFilter('all');
+    } catch (e) {
+      loadEl.style.display = 'none';
+      errEl.textContent    = 'Błąd: ' + e.message;
+      errEl.style.display  = 'block';
+    } finally {
+      loadEl.style.display = 'none';
+      document.getElementById('file-input').value = '';
+    }
+  }
+
+  function clearUpload() {
+    allData = [];
+    document.getElementById('upload-result-bar').style.display = 'none';
+    document.getElementById('upload-zone').style.display = 'block';
+    document.querySelector('.toolbar').style.display = 'none';
+    document.getElementById('table-wrap').style.display = 'none';
+    document.getElementById('upload-error').style.display = 'none';
   }
 
   async function initFunds() {
@@ -792,7 +941,11 @@
               data-fund="${f.id}" onclick="switchFund('${f.id}')">
         <span class="fund-short">${f.short}</span>
         <span class="fund-long">${f.name}</span>
-      </button>`).join('');
+      </button>`).join('') + `
+      <button class="fund-tab upload-tab" data-fund="upload" onclick="switchFund('upload')">
+        <span class="fund-short">&#128194;</span>
+        <span class="fund-long">Twoja analiza</span>
+      </button>`;
   }
 
   document.getElementById('search').addEventListener('input', renderTable);

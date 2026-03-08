@@ -9,6 +9,8 @@ import os
 import time
 import sqlite3
 import json
+import threading
+import re
 from deep_translator import GoogleTranslator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -17,6 +19,9 @@ app = Flask(__name__)
 # ── Baza danych (cache) ───────────────────────────────────────────────────────
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache.db')
+
+# L1 – pamięć (ultra-szybki odczyt), L2 – SQLite (persystencja)
+_mem_cache: dict = {}  # {(namespace, key): (data, ts)}
 
 
 def init_db():
@@ -30,10 +35,23 @@ def init_db():
                 PRIMARY KEY (namespace, key)
             )
         ''')
+        con.execute('PRAGMA journal_mode=WAL')  # równoległe odczyty podczas zapisu
         con.commit()
 
 
 def cache_get(namespace: str, key: str, ttl: float):
+    mem_key = (namespace, key)
+    now = time.time()
+
+    # L1 – pamięć
+    entry = _mem_cache.get(mem_key)
+    if entry is not None:
+        data, ts = entry
+        if now - ts < ttl:
+            return data
+        del _mem_cache[mem_key]
+
+    # L2 – SQLite
     with sqlite3.connect(DB_PATH) as con:
         row = con.execute(
             'SELECT value, ts FROM cache WHERE namespace=? AND key=?',
@@ -42,21 +60,26 @@ def cache_get(namespace: str, key: str, ttl: float):
     if row is None:
         return None
     value, ts = row
-    if time.time() - ts >= ttl:
+    if now - ts >= ttl:
         return None
-    return json.loads(value)
+    data = json.loads(value)
+    _mem_cache[mem_key] = (data, ts)  # podgrzej L1
+    return data
 
 
 def cache_set(namespace: str, key: str, data) -> None:
+    ts = time.time()
+    _mem_cache[(namespace, key)] = (data, ts)
     with sqlite3.connect(DB_PATH) as con:
         con.execute(
             'INSERT OR REPLACE INTO cache (namespace, key, value, ts) VALUES (?, ?, ?, ?)',
-            (namespace, key, json.dumps(data, default=str), time.time())
+            (namespace, key, json.dumps(data, default=str), ts)
         )
         con.commit()
 
 
 def cache_delete(namespace: str, key: str) -> None:
+    _mem_cache.pop((namespace, key), None)
     with sqlite3.connect(DB_PATH) as con:
         con.execute('DELETE FROM cache WHERE namespace=? AND key=?', (namespace, key))
         con.commit()
@@ -65,6 +88,7 @@ def cache_delete(namespace: str, key: str) -> None:
 init_db()
 
 # ── Konfiguracja funduszy ─────────────────────────────────────────────────────
+# (cache warmer uruchamiany po zdefiniowaniu FUNDS i _build_fund_response)
 
 FUNDS = {
     'tdiv': {
@@ -135,6 +159,68 @@ EXCHANGE_MAP = {
     'BB': '.BR','SS': '.ST',  'NO': '.OL',  'SP': '.SI',
     'CN': '.TO','PW': '.WA',  'AV': '.VI',  'PL': '.LS',
     'IT': '.TA','SJ': '.JO',
+    # Azja
+    'KS': '.KS', 'KQ': '.KQ',            # Korea (KRX / KOSDAQ)
+    'TT': '.TW',                          # Tajwan (TWSE)
+    'TB': '.BK',                          # Tajlandia
+    'MK': '.KL',                          # Malezja
+    'IJ': '.JK',                          # Indonezja
+    'IN': '.NS', 'IB': '.BO',            # Indie (NSE / BSE)
+    'PM': '.PS',                          # Filipiny
+    # Ameryka Łac.
+    'BZ': '.SA',                          # Brazylia
+    'MM': '.MX',                          # Meksyk
+}
+
+# Pełne nazwy giełd → sufiks yfinance (dla generycznego parsera)
+EXCHANGE_NAME_MAP = {
+    'korea stock exchange': '.KS', 'krx': '.KS', 'kospi': '.KS',
+    'kosdaq': '.KQ',
+    'taiwan stock exchange': '.TW', 'twse': '.TW',
+    'taiwan otc': '.TWO', 'taipei exchange': '.TWO',
+    'tokyo stock exchange': '.T', 'tse': '.T', 'jpx': '.T',
+    'hong kong stock exchange': '.HK', 'hkex': '.HK',
+    'shanghai stock exchange': '.SS', 'sse': '.SS',
+    'shenzhen stock exchange': '.SZ', 'szse': '.SZ',
+    'national stock exchange of india': '.NS', 'nse india': '.NS',
+    'bombay stock exchange': '.BO', 'bse india': '.BO',
+    'singapore exchange': '.SI', 'sgx': '.SI',
+    'australian securities exchange': '.AX', 'asx': '.AX',
+    'bursa malaysia': '.KL',
+    'stock exchange of thailand': '.BK', 'set': '.BK',
+    'indonesia stock exchange': '.JK', 'idx': '.JK',
+    'london stock exchange': '.L', 'lse': '.L',
+    'euronext amsterdam': '.AS', 'euronext paris': '.PA',
+    'euronext brussels': '.BR', 'euronext lisbon': '.LS',
+    'xetra': '.DE', 'deutsche boerse': '.DE',
+    'six swiss exchange': '.SW', 'swiss exchange': '.SW',
+    'oslo bors': '.OL', 'oslo stock exchange': '.OL',
+    'nasdaq stockholm': '.ST', 'nasdaq helsinki': '.HE',
+    'nasdaq copenhagen': '.CO',
+    'borsa italiana': '.MI',
+    'bolsa de madrid': '.MC', 'bmex': '.MC',
+    'vienna stock exchange': '.VI',
+    'warsaw stock exchange': '.WA', 'gpw': '.WA',
+    'johannesburg stock exchange': '.JO', 'jse': '.JO',
+    'tel aviv stock exchange': '.TA', 'tase': '.TA',
+    'toronto stock exchange': '.TO', 'tsx': '.TO',
+    'new york stock exchange': '', 'nyse': '', 'nasdaq': '', 'nyse arca': '',
+    # Dwuliterowe kody krajów (np. kolumna "Stock market" w plikach Vanguard)
+    'us': '', 'gb': '.L', 'de': '.DE', 'fr': '.PA', 'ch': '.SW',
+    'nl': '.AS', 'be': '.BR', 'pt': '.LS', 'es': '.MC', 'it': '.MI',
+    'se': '.ST', 'no': '.OL', 'dk': '.CO', 'fi': '.HE', 'at': '.VI',
+    'pl': '.WA', 'au': '.AX', 'sg': '.SI', 'hk': '.HK', 'jp': '.T',
+    'kr': '.KS', 'tw': '.TW', 'cn': '.SS', 'in': '.NS', 'my': '.KL',
+    'th': '.BK', 'id': '.JK', 'il': '.TA', 'za': '.JO', 'br': '.SA',
+    'ca': '.TO', 'mx': '.MX',
+}
+
+# Prefiks kraju ISIN → sufiks yfinance (ostatnia szansa)
+ISIN_COUNTRY_TO_EXCHANGE = {
+    'KR': '.KS', 'JP': '.T',  'HK': '.HK', 'TW': '.TW',
+    'CN': '.SS', 'IN': '.NS', 'SG': '.SI', 'AU': '.AX',
+    'MY': '.KL', 'TH': '.BK', 'ID': '.JK', 'IL': '.TA',
+    'BR': '.SA', 'MX': '.MX', 'ZA': '.JO',
 }
 
 
@@ -275,6 +361,223 @@ def analyze_series(series):
     return result
 
 
+# ── Generyczny parser plików (Excel / CSV) ────────────────────────────────────
+
+def _isin_to_local_ticker(isin: str) -> str:
+    """Wyciąga lokalny ticker giełdowy z ISIN dla znanych formatów."""
+    country = isin[:2]
+    try:
+        if country == 'KR':
+            # KR7XXXXXX000 → ISIN[3:9] = 6-cyfrowy kod KRX
+            return isin[3:9]
+        if country == 'TW':
+            # TW000XXXX00Y → int(ISIN[2:9]) daje 4-cyfrowy kod TWSE
+            return str(int(isin[2:9]))
+    except Exception:
+        pass
+    return ''
+
+
+def _download_prices_chunked(tickers: list, start: str, end: str, chunk_size: int = 100) -> pd.DataFrame:
+    """Pobiera ceny zamknięcia w partiach, łączy wyniki."""
+    all_close = pd.DataFrame()
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i + chunk_size]
+        try:
+            raw = yf.download(chunk, start=start, end=end,
+                              auto_adjust=True, progress=False, threads=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                close = raw['Close']
+            else:
+                close = raw[['Close']]
+                close.columns = chunk
+            all_close = close if all_close.empty else all_close.join(close, how='outer')
+        except Exception:
+            continue
+    return all_close
+
+
+_COL_WEIGHT      = re.compile(r'weight|alloc|% of|waga|udzia', re.I)
+_COL_NAME        = re.compile(r'^(name|security|holding|company|issuer|instrument|nazwa|emitent|asset name|security desc)', re.I)
+_COL_TICKER      = re.compile(r'^(ticker|symbol)$', re.I)
+_COL_ISIN        = re.compile(r'isin', re.I)
+_COL_EXCHANGE    = re.compile(r'^(exchange|market|giełda|rynek)', re.I)
+_COL_ASSET_CLASS = re.compile(r'^(asset.?class|klasa aktyw|asset type)', re.I)
+_EQUITY_CLASS    = re.compile(r'^equity|stock|akcj', re.I)
+_SKIP_NAMES      = re.compile(
+    r'^(cash|total|other assets|other|razem|gotówka|xgld|xtreasury|money market'
+    r'|fixed income|bond|treasury|derivative|futures|forward|option|swap'
+    r'|blackrock cash|ishares cash|ishares liquidity|liquidity fund'
+    r'|n\/a|\-+|\.+)$',
+    re.I
+)
+
+
+def parse_generic_file(file_bytes: bytes, filename: str) -> list:
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+
+    # Odczyt do surowego DataFrame (brak nagłówka)
+    df_raw = None
+    if ext == 'csv':
+        for enc in ('utf-8-sig', 'utf-8', 'latin-1', 'cp1250'):
+            for sep in (',', ';', '\t'):
+                try:
+                    df = pd.read_csv(io.BytesIO(file_bytes), header=None,
+                                     encoding=enc, sep=sep, on_bad_lines='skip', dtype=str)
+                    if df.shape[1] >= 3:
+                        df_raw = df
+                        break
+                except Exception:
+                    continue
+            if df_raw is not None:
+                break
+    else:
+        try:
+            df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+        except Exception as e:
+            raise ValueError(f'Błąd odczytu pliku Excel: {e}')
+
+    if df_raw is None or df_raw.shape[1] < 2:
+        raise ValueError('Nie można odczytać pliku. Sprawdź format (xlsx/xls/csv).')
+
+    df_raw = df_raw.fillna('')
+
+    # Wykryj wiersz nagłówkowy
+    header_idx = None
+    for i, row in df_raw.iterrows():
+        cells = [str(c).strip() for c in row if str(c).strip()]
+        if len(cells) < 2:
+            continue
+        score = sum(1 for c in cells if (
+            _COL_WEIGHT.search(c) or _COL_NAME.match(c) or
+            _COL_TICKER.match(c) or _COL_ISIN.search(c)
+        ))
+        if score >= 1:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        raise ValueError('Nie można wykryć nagłówka tabeli. Sprawdź format pliku.')
+
+    headers = [str(c).strip() or f'col_{j}' for j, c in enumerate(df_raw.iloc[header_idx])]
+    data = df_raw.iloc[header_idx + 1:].reset_index(drop=True)
+    data.columns = headers
+
+    # Mapowanie kolumn
+    name_col = ticker_col = isin_col = weight_col = exchange_col = asset_class_col = None
+    for h in headers:
+        if name_col        is None and _COL_NAME.match(h):        name_col        = h
+        if ticker_col      is None and _COL_TICKER.match(h):      ticker_col      = h
+        if isin_col        is None and _COL_ISIN.search(h):       isin_col        = h
+        if weight_col      is None and _COL_WEIGHT.search(h):     weight_col      = h
+        if exchange_col    is None and _COL_EXCHANGE.match(h):    exchange_col    = h
+        if asset_class_col is None and _COL_ASSET_CLASS.match(h): asset_class_col = h
+
+    if name_col is None:
+        name_col = headers[0]  # fallback: pierwsza kolumna
+    if ticker_col is None and isin_col is None:
+        raise ValueError('Nie znaleziono kolumny z tickerem ani ISIN.')
+
+    # Skala wag (ułamek 0-1 vs procent 0-100)
+    raw_weights = []
+    if weight_col:
+        for v in data[weight_col]:
+            try:
+                w = float(str(v).replace(',', '.').replace('%', '').strip())
+                if w > 0:
+                    raw_weights.append(w)
+            except Exception:
+                pass
+    weight_scale = 100.0 if raw_weights and max(raw_weights) <= 1.5 else 1.0
+
+    holdings = []
+    for _, row in data.iterrows():
+        name = str(row.get(name_col, '')).strip()
+        if not name or name in ('nan', 'None') or _SKIP_NAMES.match(name):
+            continue
+
+        # Pomiń wiersze nie będące akcjami (gotówka, obligacje, derywaty…)
+        if asset_class_col:
+            ac = str(row.get(asset_class_col, '')).strip()
+            if ac and not _EQUITY_CLASS.match(ac):
+                continue
+
+        weight_str = None
+        if weight_col:
+            try:
+                w = float(str(row.get(weight_col, '')).replace(',', '.').replace('%', '').strip())
+                if w > 0:
+                    weight_str = f'{w * weight_scale:.2f}%'.replace('.', ',')
+            except Exception:
+                pass
+
+        ticker_raw = ''
+        yf_ticker  = None
+
+        # Nazwa giełdy → sufiks yfinance
+        exch_suffix = ''
+        if exchange_col:
+            exch_name = str(row.get(exchange_col, '')).strip().lower()
+            exch_suffix = EXCHANGE_NAME_MAP.get(exch_name, '')
+
+        if ticker_col:
+            t = str(row.get(ticker_col, '')).strip()
+            if t and t not in ('nan', '-', '', '—'):
+                ticker_raw = t
+                if ' ' in t and len(t.split()[-1]) == 2:
+                    # Bloomberg format: "012450 KS"
+                    yf_ticker = bloomberg_to_yfinance(t)
+                elif exch_suffix:
+                    # Lokalny ticker + znana giełda: "012450" + ".KS"
+                    yf_ticker = t + exch_suffix
+                else:
+                    yf_ticker = t
+
+        if isin_col and not yf_ticker:
+            isin = str(row.get(isin_col, '')).strip()
+            if isin and len(isin) == 12 and isin[:2].isalpha():
+                ticker_raw = ticker_raw or isin
+                if isin in POLISH_ISIN_OVERRIDES:
+                    yf_ticker = POLISH_ISIN_OVERRIDES[isin]
+                else:
+                    country = isin[:2]
+                    suffix  = exch_suffix or ISIN_COUNTRY_TO_EXCHANGE.get(country, '')
+                    local   = _isin_to_local_ticker(isin)
+                    if local and suffix:
+                        # Znamy format ISIN i giełdę: "005930" + ".KS"
+                        yf_ticker = local + suffix
+                    elif suffix == '':
+                        # Rynek US lub inny bez sufiksu → przekaż ISIN
+                        # (yfinance.Ticker obsługuje ISINy, download może nie)
+                        yf_ticker = isin
+                    else:
+                        # Nieznany format lokalny, ale znamy sufiks → użyj ISIN
+                        yf_ticker = isin
+
+        if not yf_ticker:
+            continue
+
+        holdings.append({
+            'number':     len(holdings) + 1,
+            'name':       name,
+            'ticker_raw': ticker_raw,
+            'ticker':     yf_ticker,
+            'weight':     weight_str,
+            'sector':     '',
+        })
+
+    if not holdings:
+        raise ValueError('Nie wykryto żadnych pozycji. Sprawdź format pliku.')
+    return holdings
+
+
+# ── Upload sesyjny ─────────────────────────────────────────────────────────────
+
+_upload_session = None
+
+
 # ── Endpointy ─────────────────────────────────────────────────────────────────
 
 @app.route('/')
@@ -287,30 +590,19 @@ def get_funds():
     return jsonify(list(FUNDS.values()))
 
 
-@app.route('/api/data')
-def get_data():
-    fund_id = request.args.get('fund', 'tdiv')
-    if fund_id not in FUNDS:
-        return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
-
-    cached = cache_get('fund_data', fund_id, CACHE_TTL)
-    if cached is not None:
-        return jsonify(cached)
-
+def _build_fund_response(fund_id: str) -> dict:
+    """Pobiera dane funduszu z zewnątrz i zwraca gotowy słownik odpowiedzi."""
     holdings, holdings_source = load_holdings(fund_id)
     tickers = [h['ticker'] for h in holdings]
 
     end_date   = datetime.now()
     start_date = end_date - timedelta(days=25)
-    try:
-        raw = yf.download(
-            tickers,
-            start=start_date.strftime('%Y-%m-%d'),
-            end=end_date.strftime('%Y-%m-%d'),
-            auto_adjust=True, progress=False, threads=True,
-        )
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    raw = yf.download(
+        tickers,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        auto_adjust=True, progress=False, threads=True,
+    )
 
     if isinstance(raw.columns, pd.MultiIndex):
         close = raw['Close']
@@ -318,7 +610,6 @@ def get_data():
         close = raw[['Close']]
         close.columns = tickers
 
-    # Supplemental download for tickers dropped by yfinance in large batches
     missing = [t for t in tickers if t not in close.columns]
     if missing:
         try:
@@ -339,12 +630,12 @@ def get_data():
     results = []
     for h in holdings:
         entry = {
-            'number':     h['number'],
-            'name':       h['name'],
-            'ticker':     h['ticker_raw'],
-            'yf_ticker':  h['ticker'],
-            'weight':     h['weight'],
-            'sector':     h.get('sector', ''),
+            'number':    h['number'],
+            'name':      h['name'],
+            'ticker':    h['ticker_raw'],
+            'yf_ticker': h['ticker'],
+            'weight':    h['weight'],
+            'sector':    h.get('sector', ''),
         }
         try:
             series = close[h['ticker']].dropna() if h['ticker'] in close.columns else None
@@ -357,7 +648,7 @@ def get_data():
     up_count   = sum(1 for r in results if r.get('daily_trend') == 'up')
     down_count = sum(1 for r in results if r.get('daily_trend') == 'down')
 
-    response = {
+    return {
         'data':            results,
         'updated_at':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'holdings_source': holdings_source,
@@ -368,6 +659,46 @@ def get_data():
             'unknown': len(results) - up_count - down_count,
         },
     }
+
+
+def _warm_fund_cache():
+    """Odświeża cache wszystkich funduszy w tle (pomija świeże wpisy)."""
+    for fund_id in FUNDS:
+        if cache_get('fund_data', fund_id, CACHE_TTL) is not None:
+            continue
+        try:
+            response = _build_fund_response(fund_id)
+            cache_set('fund_data', fund_id, response)
+        except Exception:
+            pass
+
+
+def _start_cache_warmer():
+    """Uruchamia wątek podgrzewający cache; odświeża co CACHE_TTL - 60 s."""
+    def loop():
+        _warm_fund_cache()           # pierwsze uruchomienie przy starcie
+        while True:
+            time.sleep(CACHE_TTL - 60)
+            _warm_fund_cache()
+    t = threading.Thread(target=loop, daemon=True, name='cache-warmer')
+    t.start()
+
+
+@app.route('/api/data')
+def get_data():
+    fund_id = request.args.get('fund', 'tdiv')
+    if fund_id not in FUNDS:
+        return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
+
+    cached = cache_get('fund_data', fund_id, CACHE_TTL)
+    if cached is not None:
+        return jsonify(cached)
+
+    try:
+        response = _build_fund_response(fund_id)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
     cache_set('fund_data', fund_id, response)
     return jsonify(response)
 
@@ -630,12 +961,96 @@ def get_chart(ticker):
     })
 
 
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    global _upload_session
+    if 'file' not in request.files:
+        return jsonify({'error': 'Brak pliku w żądaniu'}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({'error': 'Nie wybrano pliku'}), 400
+    ext = f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
+    if ext not in ('xlsx', 'xls', 'csv'):
+        return jsonify({'error': 'Obsługiwane formaty: xlsx, xls, csv'}), 400
+
+    try:
+        holdings = parse_generic_file(f.read(), f.filename)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 422
+
+    # Rozwiąż US ISINy → symbole (yfinance.Ticker obsługuje ISINy,
+    # ale yf.download() już nie — robimy batch-resolve w tle)
+    def _resolve_isin(h):
+        t = h['ticker']
+        if len(t) == 12 and t[:2].isalpha() and not t[2].isalpha():
+            try:
+                sym = yf.Ticker(t).fast_info.get('symbol') or ''
+                if sym:
+                    return h['number'], sym
+            except Exception:
+                pass
+        return h['number'], t
+
+    us_isin_holdings = [h for h in holdings
+                        if len(h['ticker']) == 12 and h['ticker'][:2] == 'US']
+    if us_isin_holdings:
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            resolved = dict(ex.map(_resolve_isin, us_isin_holdings))
+        for h in holdings:
+            if h['number'] in resolved:
+                h['ticker'] = resolved[h['number']]
+
+    tickers    = [h['ticker'] for h in holdings]
+    end_date   = datetime.now()
+    start_date = end_date - timedelta(days=25)
+    try:
+        close = _download_prices_chunked(
+            tickers,
+            start_date.strftime('%Y-%m-%d'),
+            end_date.strftime('%Y-%m-%d'),
+        )
+    except Exception as e:
+        return jsonify({'error': f'Błąd pobierania cen: {e}'}), 500
+
+    results = []
+    for h in holdings:
+        entry = {
+            'number':    h['number'],
+            'name':      h['name'],
+            'ticker':    h['ticker_raw'],
+            'yf_ticker': h['ticker'],
+            'weight':    h['weight'],
+            'sector':    '',
+        }
+        try:
+            series = close[h['ticker']].dropna() if h['ticker'] in close.columns else None
+            entry.update(analyze_series(series))
+        except Exception:
+            entry.update(analyze_series(None))
+        results.append(entry)
+
+    up_count   = sum(1 for r in results if r.get('daily_trend') == 'up')
+    down_count = sum(1 for r in results if r.get('daily_trend') == 'down')
+
+    _upload_session = {
+        'data':            results,
+        'updated_at':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'holdings_source': f.filename,
+        'fund': {'id': 'upload', 'name': f.filename, 'short': 'Własny', 'currency': '—'},
+        'summary': {'up': up_count, 'down': down_count,
+                    'unknown': len(results) - up_count - down_count},
+    }
+    return jsonify(_upload_session)
+
+
 @app.route('/api/refresh')
 def refresh_cache():
     fund_id = request.args.get('fund', 'tdiv')
     cache_delete('fund_data', fund_id)
     return jsonify({'status': 'ok'})
 
+
+_start_cache_warmer()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
