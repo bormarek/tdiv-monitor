@@ -159,6 +159,60 @@ EXCHANGE_MAP = {
     'BB': '.BR','SS': '.ST',  'NO': '.OL',  'SP': '.SI',
     'CN': '.TO','PW': '.WA',  'AV': '.VI',  'PL': '.LS',
     'IT': '.TA','SJ': '.JO',
+    # Azja
+    'KS': '.KS', 'KQ': '.KQ',            # Korea (KRX / KOSDAQ)
+    'TT': '.TW',                          # Tajwan (TWSE)
+    'TB': '.BK',                          # Tajlandia
+    'MK': '.KL',                          # Malezja
+    'IJ': '.JK',                          # Indonezja
+    'IN': '.NS', 'IB': '.BO',            # Indie (NSE / BSE)
+    'PM': '.PS',                          # Filipiny
+    # Ameryka Łac.
+    'BZ': '.SA',                          # Brazylia
+    'MM': '.MX',                          # Meksyk
+}
+
+# Pełne nazwy giełd → sufiks yfinance (dla generycznego parsera)
+EXCHANGE_NAME_MAP = {
+    'korea stock exchange': '.KS', 'krx': '.KS', 'kospi': '.KS',
+    'kosdaq': '.KQ',
+    'taiwan stock exchange': '.TW', 'twse': '.TW',
+    'taiwan otc': '.TWO', 'taipei exchange': '.TWO',
+    'tokyo stock exchange': '.T', 'tse': '.T', 'jpx': '.T',
+    'hong kong stock exchange': '.HK', 'hkex': '.HK',
+    'shanghai stock exchange': '.SS', 'sse': '.SS',
+    'shenzhen stock exchange': '.SZ', 'szse': '.SZ',
+    'national stock exchange of india': '.NS', 'nse india': '.NS',
+    'bombay stock exchange': '.BO', 'bse india': '.BO',
+    'singapore exchange': '.SI', 'sgx': '.SI',
+    'australian securities exchange': '.AX', 'asx': '.AX',
+    'bursa malaysia': '.KL',
+    'stock exchange of thailand': '.BK', 'set': '.BK',
+    'indonesia stock exchange': '.JK', 'idx': '.JK',
+    'london stock exchange': '.L', 'lse': '.L',
+    'euronext amsterdam': '.AS', 'euronext paris': '.PA',
+    'euronext brussels': '.BR', 'euronext lisbon': '.LS',
+    'xetra': '.DE', 'deutsche boerse': '.DE',
+    'six swiss exchange': '.SW', 'swiss exchange': '.SW',
+    'oslo bors': '.OL', 'oslo stock exchange': '.OL',
+    'nasdaq stockholm': '.ST', 'nasdaq helsinki': '.HE',
+    'nasdaq copenhagen': '.CO',
+    'borsa italiana': '.MI',
+    'bolsa de madrid': '.MC', 'bmex': '.MC',
+    'vienna stock exchange': '.VI',
+    'warsaw stock exchange': '.WA', 'gpw': '.WA',
+    'johannesburg stock exchange': '.JO', 'jse': '.JO',
+    'tel aviv stock exchange': '.TA', 'tase': '.TA',
+    'toronto stock exchange': '.TO', 'tsx': '.TO',
+    'new york stock exchange': '', 'nyse': '', 'nasdaq': '', 'nyse arca': '',
+}
+
+# Prefiks kraju ISIN → sufiks yfinance (ostatnia szansa)
+ISIN_COUNTRY_TO_EXCHANGE = {
+    'KR': '.KS', 'JP': '.T',  'HK': '.HK', 'TW': '.TW',
+    'CN': '.SS', 'IN': '.NS', 'SG': '.SI', 'AU': '.AX',
+    'MY': '.KL', 'TH': '.BK', 'ID': '.JK', 'IL': '.TA',
+    'BR': '.SA', 'MX': '.MX', 'ZA': '.JO',
 }
 
 
@@ -301,11 +355,20 @@ def analyze_series(series):
 
 # ── Generyczny parser plików (Excel / CSV) ────────────────────────────────────
 
-_COL_WEIGHT = re.compile(r'weight|alloc|% of|waga|udzia', re.I)
-_COL_NAME   = re.compile(r'^(name|security|holding|company|issuer|instrument|nazwa|emitent|asset name|security desc)', re.I)
-_COL_TICKER = re.compile(r'^(ticker|symbol)$', re.I)
-_COL_ISIN   = re.compile(r'isin', re.I)
-_SKIP_NAMES = re.compile(r'^(cash|total|other|razem|gotówka|xgld|xtreasury|money market)', re.I)
+_COL_WEIGHT      = re.compile(r'weight|alloc|% of|waga|udzia', re.I)
+_COL_NAME        = re.compile(r'^(name|security|holding|company|issuer|instrument|nazwa|emitent|asset name|security desc)', re.I)
+_COL_TICKER      = re.compile(r'^(ticker|symbol)$', re.I)
+_COL_ISIN        = re.compile(r'isin', re.I)
+_COL_EXCHANGE    = re.compile(r'^(exchange|market|giełda|rynek)', re.I)
+_COL_ASSET_CLASS = re.compile(r'^(asset.?class|klasa aktyw|asset type)', re.I)
+_EQUITY_CLASS    = re.compile(r'^equity|stock|akcj', re.I)
+_SKIP_NAMES      = re.compile(
+    r'^(cash|total|other assets|other|razem|gotówka|xgld|xtreasury|money market'
+    r'|fixed income|bond|treasury|derivative|futures|forward|option|swap'
+    r'|blackrock cash|ishares cash|ishares liquidity|liquidity fund'
+    r'|n\/a|\-+|\.+)$',
+    re.I
+)
 
 
 def parse_generic_file(file_bytes: bytes, filename: str) -> list:
@@ -359,12 +422,14 @@ def parse_generic_file(file_bytes: bytes, filename: str) -> list:
     data.columns = headers
 
     # Mapowanie kolumn
-    name_col = ticker_col = isin_col = weight_col = None
+    name_col = ticker_col = isin_col = weight_col = exchange_col = asset_class_col = None
     for h in headers:
-        if name_col   is None and _COL_NAME.match(h):   name_col   = h
-        if ticker_col is None and _COL_TICKER.match(h): ticker_col = h
-        if isin_col   is None and _COL_ISIN.search(h):  isin_col   = h
-        if weight_col is None and _COL_WEIGHT.search(h): weight_col = h
+        if name_col        is None and _COL_NAME.match(h):        name_col        = h
+        if ticker_col      is None and _COL_TICKER.match(h):      ticker_col      = h
+        if isin_col        is None and _COL_ISIN.search(h):       isin_col        = h
+        if weight_col      is None and _COL_WEIGHT.search(h):     weight_col      = h
+        if exchange_col    is None and _COL_EXCHANGE.match(h):    exchange_col    = h
+        if asset_class_col is None and _COL_ASSET_CLASS.match(h): asset_class_col = h
 
     if name_col is None:
         name_col = headers[0]  # fallback: pierwsza kolumna
@@ -389,6 +454,12 @@ def parse_generic_file(file_bytes: bytes, filename: str) -> list:
         if not name or name in ('nan', 'None') or _SKIP_NAMES.match(name):
             continue
 
+        # Pomiń wiersze nie będące akcjami (gotówka, obligacje, derywaty…)
+        if asset_class_col:
+            ac = str(row.get(asset_class_col, '')).strip()
+            if ac and not _EQUITY_CLASS.match(ac):
+                continue
+
         weight_str = None
         if weight_col:
             try:
@@ -401,17 +472,38 @@ def parse_generic_file(file_bytes: bytes, filename: str) -> list:
         ticker_raw = ''
         yf_ticker  = None
 
+        # Nazwa giełdy → sufiks yfinance
+        exch_suffix = ''
+        if exchange_col:
+            exch_name = str(row.get(exchange_col, '')).strip().lower()
+            exch_suffix = EXCHANGE_NAME_MAP.get(exch_name, '')
+
         if ticker_col:
             t = str(row.get(ticker_col, '')).strip()
             if t and t not in ('nan', '-', '', '—'):
                 ticker_raw = t
-                yf_ticker = bloomberg_to_yfinance(t) if ' ' in t and len(t.split()[-1]) == 2 else t
+                if ' ' in t and len(t.split()[-1]) == 2:
+                    # Bloomberg format: "012450 KS"
+                    yf_ticker = bloomberg_to_yfinance(t)
+                elif exch_suffix:
+                    # Lokalny ticker + znana giełda: "012450" + ".KS"
+                    yf_ticker = t + exch_suffix
+                else:
+                    yf_ticker = t
 
         if isin_col and not yf_ticker:
             isin = str(row.get(isin_col, '')).strip()
             if isin and len(isin) == 12 and isin[:2].isalpha():
                 ticker_raw = ticker_raw or isin
-                yf_ticker  = POLISH_ISIN_OVERRIDES.get(isin, isin)
+                if isin in POLISH_ISIN_OVERRIDES:
+                    yf_ticker = POLISH_ISIN_OVERRIDES[isin]
+                elif exch_suffix and ticker_raw and ticker_raw != isin:
+                    yf_ticker = ticker_raw + exch_suffix
+                else:
+                    # Ostatnia szansa: prefiks kraju ISIN → sufiks
+                    country = isin[:2]
+                    suffix  = ISIN_COUNTRY_TO_EXCHANGE.get(country, '')
+                    yf_ticker = isin if not suffix else ticker_raw + suffix if ticker_raw != isin else isin
 
         if not yf_ticker:
             continue
