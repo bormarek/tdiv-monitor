@@ -7,10 +7,62 @@ import io
 from datetime import datetime, timedelta
 import os
 import time
+import sqlite3
+import json
 from deep_translator import GoogleTranslator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
+
+# ── Baza danych (cache) ───────────────────────────────────────────────────────
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache.db')
+
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute('''
+            CREATE TABLE IF NOT EXISTS cache (
+                namespace TEXT NOT NULL,
+                key       TEXT NOT NULL,
+                value     TEXT NOT NULL,
+                ts        REAL NOT NULL,
+                PRIMARY KEY (namespace, key)
+            )
+        ''')
+        con.commit()
+
+
+def cache_get(namespace: str, key: str, ttl: float):
+    with sqlite3.connect(DB_PATH) as con:
+        row = con.execute(
+            'SELECT value, ts FROM cache WHERE namespace=? AND key=?',
+            (namespace, key)
+        ).fetchone()
+    if row is None:
+        return None
+    value, ts = row
+    if time.time() - ts >= ttl:
+        return None
+    return json.loads(value)
+
+
+def cache_set(namespace: str, key: str, data) -> None:
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute(
+            'INSERT OR REPLACE INTO cache (namespace, key, value, ts) VALUES (?, ?, ?, ?)',
+            (namespace, key, json.dumps(data, default=str), time.time())
+        )
+        con.commit()
+
+
+def cache_delete(namespace: str, key: str) -> None:
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute('DELETE FROM cache WHERE namespace=? AND key=?', (namespace, key))
+        con.commit()
+
+
+init_db()
 
 # ── Konfiguracja funduszy ─────────────────────────────────────────────────────
 
@@ -57,11 +109,10 @@ FUNDS = {
     },
 }
 
-CACHE_TTL      = 900    # 15 minut
-INFO_CACHE_TTL = 86400  # 24 godziny
-
-_cache      = {}   # key: fund_id
-_info_cache = {}   # key: ticker
+CACHE_TTL          = 900    # 15 minut
+INFO_CACHE_TTL     = 86400  # 24 godziny
+CALENDAR_CACHE_TTL = 3600   # 1 godzina
+MARKET_CAL_TTL     = 3600   # 1 godzina
 
 # ── Ticker helpers (TDIV / Bloomberg) ────────────────────────────────────────
 
@@ -242,10 +293,9 @@ def get_data():
     if fund_id not in FUNDS:
         return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
 
-    global _cache
-    now = time.time()
-    if fund_id in _cache and now - _cache[fund_id].get('timestamp', 0) < CACHE_TTL:
-        return jsonify(_cache[fund_id]['result'])
+    cached = cache_get('fund_data', fund_id, CACHE_TTL)
+    if cached is not None:
+        return jsonify(cached)
 
     holdings, holdings_source = load_holdings(fund_id)
     tickers = [h['ticker'] for h in holdings]
@@ -318,16 +368,15 @@ def get_data():
             'unknown': len(results) - up_count - down_count,
         },
     }
-    _cache[fund_id] = {'result': response, 'timestamp': now}
+    cache_set('fund_data', fund_id, response)
     return jsonify(response)
 
 
 @app.route('/api/info/<path:ticker>')
 def get_info(ticker):
-    global _info_cache
-    now = time.time()
-    if ticker in _info_cache and now - _info_cache[ticker].get('ts', 0) < INFO_CACHE_TTL:
-        return jsonify(_info_cache[ticker]['data'])
+    cached = cache_get('company_info', ticker, INFO_CACHE_TTL)
+    if cached is not None:
+        return jsonify(cached)
     try:
         info = yf.Ticker(ticker).info
     except Exception as e:
@@ -351,12 +400,8 @@ def get_info(ticker):
         'employees':   info.get('fullTimeEmployees'),
     }
     if data['description']:
-        _info_cache[ticker] = {'data': data, 'ts': now}
+        cache_set('company_info', ticker, data)
     return jsonify(data)
-
-
-_calendar_cache = {}
-CALENDAR_CACHE_TTL = 3600  # 1 godzina
 
 
 def _safe_float(v):
@@ -369,10 +414,9 @@ def _safe_float(v):
 
 @app.route('/api/calendar/<path:ticker>')
 def get_calendar(ticker):
-    global _calendar_cache
-    now = time.time()
-    if ticker in _calendar_cache and now - _calendar_cache[ticker].get('ts', 0) < CALENDAR_CACHE_TTL:
-        return jsonify(_calendar_cache[ticker]['data'])
+    cached = cache_get('ticker_calendar', ticker, CALENDAR_CACHE_TTL)
+    if cached is not None:
+        return jsonify(cached)
 
     t = yf.Ticker(ticker)
     result = {'earnings': [], 'dividends': [], 'news': []}
@@ -445,13 +489,9 @@ def get_calendar(ticker):
             pass
 
     if result['earnings'] or result['dividends'] or result['news']:
-        _calendar_cache[ticker] = {'data': result, 'ts': now}
+        cache_set('ticker_calendar', ticker, result)
 
     return jsonify(result)
-
-
-_market_cal_cache = {}
-MARKET_CAL_TTL = 3600  # 1 godzina
 
 
 @app.route('/api/market-calendar')
@@ -460,10 +500,9 @@ def get_market_calendar():
     if fund_id not in FUNDS:
         return jsonify({'error': f'Nieznany fundusz: {fund_id}'}), 400
 
-    global _market_cal_cache
-    now = time.time()
-    if fund_id in _market_cal_cache and now - _market_cal_cache[fund_id].get('ts', 0) < MARKET_CAL_TTL:
-        return jsonify(_market_cal_cache[fund_id]['data'])
+    cached = cache_get('market_calendar', fund_id, MARKET_CAL_TTL)
+    if cached is not None:
+        return jsonify(cached)
 
     holdings, _ = load_holdings(fund_id)
     today_str = datetime.now().strftime('%Y-%m-%d')
@@ -535,7 +574,7 @@ def get_market_calendar():
         'fund':     FUNDS[fund_id],
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     }
-    _market_cal_cache[fund_id] = {'data': result, 'ts': now}
+    cache_set('market_calendar', fund_id, result)
     return jsonify(result)
 
 
@@ -556,15 +595,36 @@ def get_chart(ticker):
     if raw.empty:
         return jsonify({'error': 'Brak danych dla tego tickera'}), 404
 
-    close = raw['Close'].iloc[:, 0].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw['Close'].dropna()
-    ma5   = close.rolling(5).mean()
-    ma20  = close.rolling(20).mean()
-    fmt   = lambda v: round(float(v), 2) if not pd.isna(v) else None
+    def col(name):
+        return raw[name].iloc[:, 0] if isinstance(raw.columns, pd.MultiIndex) else raw[name]
+
+    close  = col('Close')
+    open_  = col('Open')
+    high   = col('High')
+    low    = col('Low')
+    volume = col('Volume')
+
+    # Wyrównaj indeks do dni gdy close nie jest NaN
+    idx   = close.dropna().index
+    close = close.loc[idx]
+    open_ = open_.loc[idx]
+    high  = high.loc[idx]
+    low   = low.loc[idx]
+    volume = volume.loc[idx]
+
+    ma5  = close.rolling(5).mean()
+    ma20 = close.rolling(20).mean()
+    fmt  = lambda v: round(float(v), 2) if not pd.isna(v) else None
+    fmtv = lambda v: int(v) if not pd.isna(v) else None
 
     return jsonify({
         'ticker': ticker,
-        'dates':  [d.strftime('%Y-%m-%d') for d in close.index],
+        'dates':  [d.strftime('%Y-%m-%d') for d in idx],
         'prices': [fmt(p) for p in close.values],
+        'open':   [fmt(v) for v in open_.values],
+        'high':   [fmt(v) for v in high.values],
+        'low':    [fmt(v) for v in low.values],
+        'volume': [fmtv(v) for v in volume.values],
         'ma5':    [fmt(v) for v in ma5],
         'ma20':   [fmt(v) for v in ma20],
     })
@@ -573,8 +633,7 @@ def get_chart(ticker):
 @app.route('/api/refresh')
 def refresh_cache():
     fund_id = request.args.get('fund', 'tdiv')
-    if fund_id in _cache:
-        del _cache[fund_id]
+    cache_delete('fund_data', fund_id)
     return jsonify({'status': 'ok'})
 
 

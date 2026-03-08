@@ -54,6 +54,58 @@ tdiv-monitor/
 | Skład funduszu (holdings) | [VanEck – TDIV Holdings](https://www.vaneck.com/pl/pl/investments/dividend-etf/downloads/holdings/) |
 | Ceny akcji | Yahoo Finance via [yfinance](https://github.com/ranaroussi/yfinance) |
 
+## Schemat odświeżania danych
+
+```
+Żądanie HTTP (przeglądarka)
+          │
+          ▼
+  ┌───────────────┐
+  │  cache.db     │  SQLite – trwały cache (przeżywa restart serwera)
+  │  (SQLite)     │
+  └───────┬───────┘
+          │
+          ▼
+  Czy wpis istnieje i nie wygasł?
+  │                           │
+  TAK                        NIE
+  │                           │
+  ▼                           ▼
+Zwróć dane             Pobierz świeże dane
+z cache                        │
+                    ┌──────────┴──────────────┐
+                    │                         │
+                    ▼                         ▼
+             Źródło danych           Yahoo Finance API
+             (Excel z VanEck/         (ceny, info,
+              Beta ETF / GPW)          dywidendy, newsy)
+                    │                         │
+                    └──────────┬──────────────┘
+                               │
+                               ▼
+                     Zapisz wynik do cache.db
+                               │
+                               ▼
+                     Zwróć dane przeglądarce
+```
+
+### Czasy wygasania cache (TTL)
+
+| Namespace | Dane | TTL |
+|---|---|---|
+| `fund_data` | Skład funduszu + ceny rynkowe | 15 minut |
+| `ticker_calendar` | Raporty, dywidendy, newsy dla tickera | 1 godzina |
+| `market_calendar` | Kalendarz zdarzeń całego funduszu | 1 godzina |
+| `company_info` | Opis spółki, sektor, branża, kraj | 24 godziny |
+
+### Fallback dla holdings
+
+Jeśli zewnętrzne źródło Excel (VanEck / Beta ETF) jest niedostępne, aplikacja korzysta z lokalnego pliku `.xlsx` (tylko TDIV).
+
+### Ręczne odświeżenie
+
+Endpoint `GET /api/refresh?fund=<id>` usuwa wpis `fund_data` z bazy — kolejne żądanie pobierze dane na żywo niezależnie od TTL.
+
 ## Licencja
 
 MIT
