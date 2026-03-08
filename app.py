@@ -205,6 +205,14 @@ EXCHANGE_NAME_MAP = {
     'tel aviv stock exchange': '.TA', 'tase': '.TA',
     'toronto stock exchange': '.TO', 'tsx': '.TO',
     'new york stock exchange': '', 'nyse': '', 'nasdaq': '', 'nyse arca': '',
+    # Dwuliterowe kody krajów (np. kolumna "Stock market" w plikach Vanguard)
+    'us': '', 'gb': '.L', 'de': '.DE', 'fr': '.PA', 'ch': '.SW',
+    'nl': '.AS', 'be': '.BR', 'pt': '.LS', 'es': '.MC', 'it': '.MI',
+    'se': '.ST', 'no': '.OL', 'dk': '.CO', 'fi': '.HE', 'at': '.VI',
+    'pl': '.WA', 'au': '.AX', 'sg': '.SI', 'hk': '.HK', 'jp': '.T',
+    'kr': '.KS', 'tw': '.TW', 'cn': '.SS', 'in': '.NS', 'my': '.KL',
+    'th': '.BK', 'id': '.JK', 'il': '.TA', 'za': '.JO', 'br': '.SA',
+    'ca': '.TO', 'mx': '.MX',
 }
 
 # Prefiks kraju ISIN → sufiks yfinance (ostatnia szansa)
@@ -355,6 +363,42 @@ def analyze_series(series):
 
 # ── Generyczny parser plików (Excel / CSV) ────────────────────────────────────
 
+def _isin_to_local_ticker(isin: str) -> str:
+    """Wyciąga lokalny ticker giełdowy z ISIN dla znanych formatów."""
+    country = isin[:2]
+    try:
+        if country == 'KR':
+            # KR7XXXXXX000 → ISIN[3:9] = 6-cyfrowy kod KRX
+            return isin[3:9]
+        if country == 'TW':
+            # TW000XXXX00Y → int(ISIN[2:9]) daje 4-cyfrowy kod TWSE
+            return str(int(isin[2:9]))
+    except Exception:
+        pass
+    return ''
+
+
+def _download_prices_chunked(tickers: list, start: str, end: str, chunk_size: int = 100) -> pd.DataFrame:
+    """Pobiera ceny zamknięcia w partiach, łączy wyniki."""
+    all_close = pd.DataFrame()
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i + chunk_size]
+        try:
+            raw = yf.download(chunk, start=start, end=end,
+                              auto_adjust=True, progress=False, threads=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                close = raw['Close']
+            else:
+                close = raw[['Close']]
+                close.columns = chunk
+            all_close = close if all_close.empty else all_close.join(close, how='outer')
+        except Exception:
+            continue
+    return all_close
+
+
 _COL_WEIGHT      = re.compile(r'weight|alloc|% of|waga|udzia', re.I)
 _COL_NAME        = re.compile(r'^(name|security|holding|company|issuer|instrument|nazwa|emitent|asset name|security desc)', re.I)
 _COL_TICKER      = re.compile(r'^(ticker|symbol)$', re.I)
@@ -497,13 +541,20 @@ def parse_generic_file(file_bytes: bytes, filename: str) -> list:
                 ticker_raw = ticker_raw or isin
                 if isin in POLISH_ISIN_OVERRIDES:
                     yf_ticker = POLISH_ISIN_OVERRIDES[isin]
-                elif exch_suffix and ticker_raw and ticker_raw != isin:
-                    yf_ticker = ticker_raw + exch_suffix
                 else:
-                    # Ostatnia szansa: prefiks kraju ISIN → sufiks
                     country = isin[:2]
-                    suffix  = ISIN_COUNTRY_TO_EXCHANGE.get(country, '')
-                    yf_ticker = isin if not suffix else ticker_raw + suffix if ticker_raw != isin else isin
+                    suffix  = exch_suffix or ISIN_COUNTRY_TO_EXCHANGE.get(country, '')
+                    local   = _isin_to_local_ticker(isin)
+                    if local and suffix:
+                        # Znamy format ISIN i giełdę: "005930" + ".KS"
+                        yf_ticker = local + suffix
+                    elif suffix == '':
+                        # Rynek US lub inny bez sufiksu → przekaż ISIN
+                        # (yfinance.Ticker obsługuje ISINy, download może nie)
+                        yf_ticker = isin
+                    else:
+                        # Nieznany format lokalny, ale znamy sufiks → użyj ISIN
+                        yf_ticker = isin
 
         if not yf_ticker:
             continue
@@ -927,22 +978,39 @@ def upload_file():
     except ValueError as e:
         return jsonify({'error': str(e)}), 422
 
+    # Rozwiąż US ISINy → symbole (yfinance.Ticker obsługuje ISINy,
+    # ale yf.download() już nie — robimy batch-resolve w tle)
+    def _resolve_isin(h):
+        t = h['ticker']
+        if len(t) == 12 and t[:2].isalpha() and not t[2].isalpha():
+            try:
+                sym = yf.Ticker(t).fast_info.get('symbol') or ''
+                if sym:
+                    return h['number'], sym
+            except Exception:
+                pass
+        return h['number'], t
+
+    us_isin_holdings = [h for h in holdings
+                        if len(h['ticker']) == 12 and h['ticker'][:2] == 'US']
+    if us_isin_holdings:
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            resolved = dict(ex.map(_resolve_isin, us_isin_holdings))
+        for h in holdings:
+            if h['number'] in resolved:
+                h['ticker'] = resolved[h['number']]
+
     tickers    = [h['ticker'] for h in holdings]
     end_date   = datetime.now()
     start_date = end_date - timedelta(days=25)
     try:
-        raw = yf.download(tickers,
-                          start=start_date.strftime('%Y-%m-%d'),
-                          end=end_date.strftime('%Y-%m-%d'),
-                          auto_adjust=True, progress=False, threads=True)
+        close = _download_prices_chunked(
+            tickers,
+            start_date.strftime('%Y-%m-%d'),
+            end_date.strftime('%Y-%m-%d'),
+        )
     except Exception as e:
         return jsonify({'error': f'Błąd pobierania cen: {e}'}), 500
-
-    if isinstance(raw.columns, pd.MultiIndex):
-        close = raw['Close']
-    else:
-        close = raw[['Close']]
-        close.columns = tickers
 
     results = []
     for h in holdings:
