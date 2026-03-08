@@ -10,6 +10,7 @@ import time
 import sqlite3
 import json
 import threading
+import re
 from deep_translator import GoogleTranslator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -296,6 +297,142 @@ def analyze_series(series):
     elif len(series) >= 5:
         result['ma5'] = round(float(series.iloc[-5:].mean()), 2)
     return result
+
+
+# ── Generyczny parser plików (Excel / CSV) ────────────────────────────────────
+
+_COL_WEIGHT = re.compile(r'weight|alloc|% of|waga|udzia', re.I)
+_COL_NAME   = re.compile(r'^(name|security|holding|company|issuer|instrument|nazwa|emitent|asset name|security desc)', re.I)
+_COL_TICKER = re.compile(r'^(ticker|symbol)$', re.I)
+_COL_ISIN   = re.compile(r'isin', re.I)
+_SKIP_NAMES = re.compile(r'^(cash|total|other|razem|gotówka|xgld|xtreasury|money market)', re.I)
+
+
+def parse_generic_file(file_bytes: bytes, filename: str) -> list:
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+
+    # Odczyt do surowego DataFrame (brak nagłówka)
+    df_raw = None
+    if ext == 'csv':
+        for enc in ('utf-8-sig', 'utf-8', 'latin-1', 'cp1250'):
+            for sep in (',', ';', '\t'):
+                try:
+                    df = pd.read_csv(io.BytesIO(file_bytes), header=None,
+                                     encoding=enc, sep=sep, on_bad_lines='skip', dtype=str)
+                    if df.shape[1] >= 3:
+                        df_raw = df
+                        break
+                except Exception:
+                    continue
+            if df_raw is not None:
+                break
+    else:
+        try:
+            df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+        except Exception as e:
+            raise ValueError(f'Błąd odczytu pliku Excel: {e}')
+
+    if df_raw is None or df_raw.shape[1] < 2:
+        raise ValueError('Nie można odczytać pliku. Sprawdź format (xlsx/xls/csv).')
+
+    df_raw = df_raw.fillna('')
+
+    # Wykryj wiersz nagłówkowy
+    header_idx = None
+    for i, row in df_raw.iterrows():
+        cells = [str(c).strip() for c in row if str(c).strip()]
+        if len(cells) < 2:
+            continue
+        score = sum(1 for c in cells if (
+            _COL_WEIGHT.search(c) or _COL_NAME.match(c) or
+            _COL_TICKER.match(c) or _COL_ISIN.search(c)
+        ))
+        if score >= 1:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        raise ValueError('Nie można wykryć nagłówka tabeli. Sprawdź format pliku.')
+
+    headers = [str(c).strip() or f'col_{j}' for j, c in enumerate(df_raw.iloc[header_idx])]
+    data = df_raw.iloc[header_idx + 1:].reset_index(drop=True)
+    data.columns = headers
+
+    # Mapowanie kolumn
+    name_col = ticker_col = isin_col = weight_col = None
+    for h in headers:
+        if name_col   is None and _COL_NAME.match(h):   name_col   = h
+        if ticker_col is None and _COL_TICKER.match(h): ticker_col = h
+        if isin_col   is None and _COL_ISIN.search(h):  isin_col   = h
+        if weight_col is None and _COL_WEIGHT.search(h): weight_col = h
+
+    if name_col is None:
+        name_col = headers[0]  # fallback: pierwsza kolumna
+    if ticker_col is None and isin_col is None:
+        raise ValueError('Nie znaleziono kolumny z tickerem ani ISIN.')
+
+    # Skala wag (ułamek 0-1 vs procent 0-100)
+    raw_weights = []
+    if weight_col:
+        for v in data[weight_col]:
+            try:
+                w = float(str(v).replace(',', '.').replace('%', '').strip())
+                if w > 0:
+                    raw_weights.append(w)
+            except Exception:
+                pass
+    weight_scale = 100.0 if raw_weights and max(raw_weights) <= 1.5 else 1.0
+
+    holdings = []
+    for _, row in data.iterrows():
+        name = str(row.get(name_col, '')).strip()
+        if not name or name in ('nan', 'None') or _SKIP_NAMES.match(name):
+            continue
+
+        weight_str = None
+        if weight_col:
+            try:
+                w = float(str(row.get(weight_col, '')).replace(',', '.').replace('%', '').strip())
+                if w > 0:
+                    weight_str = f'{w * weight_scale:.2f}%'.replace('.', ',')
+            except Exception:
+                pass
+
+        ticker_raw = ''
+        yf_ticker  = None
+
+        if ticker_col:
+            t = str(row.get(ticker_col, '')).strip()
+            if t and t not in ('nan', '-', '', '—'):
+                ticker_raw = t
+                yf_ticker = bloomberg_to_yfinance(t) if ' ' in t and len(t.split()[-1]) == 2 else t
+
+        if isin_col and not yf_ticker:
+            isin = str(row.get(isin_col, '')).strip()
+            if isin and len(isin) == 12 and isin[:2].isalpha():
+                ticker_raw = ticker_raw or isin
+                yf_ticker  = POLISH_ISIN_OVERRIDES.get(isin, isin)
+
+        if not yf_ticker:
+            continue
+
+        holdings.append({
+            'number':     len(holdings) + 1,
+            'name':       name,
+            'ticker_raw': ticker_raw,
+            'ticker':     yf_ticker,
+            'weight':     weight_str,
+            'sector':     '',
+        })
+
+    if not holdings:
+        raise ValueError('Nie wykryto żadnych pozycji. Sprawdź format pliku.')
+    return holdings
+
+
+# ── Upload sesyjny ─────────────────────────────────────────────────────────────
+
+_upload_session = None
 
 
 # ── Endpointy ─────────────────────────────────────────────────────────────────
@@ -679,6 +816,71 @@ def get_chart(ticker):
         'ma5':    [fmt(v) for v in ma5],
         'ma20':   [fmt(v) for v in ma20],
     })
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    global _upload_session
+    if 'file' not in request.files:
+        return jsonify({'error': 'Brak pliku w żądaniu'}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({'error': 'Nie wybrano pliku'}), 400
+    ext = f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
+    if ext not in ('xlsx', 'xls', 'csv'):
+        return jsonify({'error': 'Obsługiwane formaty: xlsx, xls, csv'}), 400
+
+    try:
+        holdings = parse_generic_file(f.read(), f.filename)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 422
+
+    tickers    = [h['ticker'] for h in holdings]
+    end_date   = datetime.now()
+    start_date = end_date - timedelta(days=25)
+    try:
+        raw = yf.download(tickers,
+                          start=start_date.strftime('%Y-%m-%d'),
+                          end=end_date.strftime('%Y-%m-%d'),
+                          auto_adjust=True, progress=False, threads=True)
+    except Exception as e:
+        return jsonify({'error': f'Błąd pobierania cen: {e}'}), 500
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        close = raw['Close']
+    else:
+        close = raw[['Close']]
+        close.columns = tickers
+
+    results = []
+    for h in holdings:
+        entry = {
+            'number':    h['number'],
+            'name':      h['name'],
+            'ticker':    h['ticker_raw'],
+            'yf_ticker': h['ticker'],
+            'weight':    h['weight'],
+            'sector':    '',
+        }
+        try:
+            series = close[h['ticker']].dropna() if h['ticker'] in close.columns else None
+            entry.update(analyze_series(series))
+        except Exception:
+            entry.update(analyze_series(None))
+        results.append(entry)
+
+    up_count   = sum(1 for r in results if r.get('daily_trend') == 'up')
+    down_count = sum(1 for r in results if r.get('daily_trend') == 'down')
+
+    _upload_session = {
+        'data':            results,
+        'updated_at':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'holdings_source': f.filename,
+        'fund': {'id': 'upload', 'name': f.filename, 'short': 'Własny', 'currency': '—'},
+        'summary': {'up': up_count, 'down': down_count,
+                    'unknown': len(results) - up_count - down_count},
+    }
+    return jsonify(_upload_session)
 
 
 @app.route('/api/refresh')
