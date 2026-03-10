@@ -911,13 +911,23 @@ def get_market_calendar():
 
 @app.route('/api/chart/<path:ticker>')
 def get_chart(ticker):
-    end_date   = datetime.now()
-    start_date = end_date - timedelta(days=180)
+    # Obsługiwane okresy: 1d, 1wk, 1mo (domyślny), 1y
+    period = request.args.get('period', '1mo')
+    PERIOD_CONFIG = {
+        '1d':  {'period': '1d',  'interval': '5m'},
+        '1wk': {'period': '5d',  'interval': '1h'},
+        '1mo': {'period': '6mo', 'interval': '1d'},
+        '1y':  {'period': '1y',  'interval': '1d'},
+    }
+    if period not in PERIOD_CONFIG:
+        period = '1mo'
+    cfg = PERIOD_CONFIG[period]
+    intraday = period in ('1d', '1wk')
     try:
         raw = yf.download(
             ticker,
-            start=start_date.strftime('%Y-%m-%d'),
-            end=end_date.strftime('%Y-%m-%d'),
+            period=cfg['period'],
+            interval=cfg['interval'],
             auto_adjust=True, progress=False,
         )
     except Exception as e:
@@ -948,16 +958,78 @@ def get_chart(ticker):
     fmt  = lambda v: round(float(v), 2) if not pd.isna(v) else None
     fmtv = lambda v: int(v) if not pd.isna(v) else None
 
+    def _calc_rsi(series, period=14):
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.ewm(com=period-1, min_periods=period).mean()
+        avg_loss = loss.ewm(com=period-1, min_periods=period).mean()
+        rs = avg_gain / avg_loss.replace(0, float('inf'))
+        return 100 - (100 / (1 + rs))
+
+    def _calc_macd(series, fast=12, slow=26, signal=9):
+        ema_fast = series.ewm(span=fast, adjust=False).mean()
+        ema_slow = series.ewm(span=slow, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        sig = macd.ewm(span=signal, adjust=False).mean()
+        return macd, sig, macd - sig
+
+    def _calc_bb(series, period=20, std=2):
+        mid = series.rolling(period).mean()
+        sd = series.rolling(period).std()
+        return mid + std*sd, mid, mid - std*sd
+
+    rsi = _calc_rsi(close)
+    bb_upper, bb_middle, bb_lower = _calc_bb(close)
+    macd, macd_signal, macd_hist = _calc_macd(close)
+
+    # Trend
+    if len(ma20.dropna()) >= 21:
+        ma20_now  = ma20.dropna().iloc[-1]
+        ma20_prev = ma20.dropna().iloc[-21] if len(ma20.dropna()) >= 21 else ma20.dropna().iloc[0]
+        price_now = close.iloc[-1]
+        ma20_rising = ma20_now > ma20_prev
+        price_above = price_now > ma20_now
+        if ma20_rising and price_above:
+            trend = 'bullish'
+        elif not ma20_rising and not price_above:
+            trend = 'bearish'
+        else:
+            trend = 'sideways'
+    else:
+        trend = 'unknown'
+
+    # Format dat: intraday → Unix timestamp (sekundy UTC) dla lightweight-charts, daily → YYYY-MM-DD
+    if intraday:
+        date_strs = []
+        for d in idx:
+            if hasattr(d, 'timestamp'):
+                date_strs.append(int(d.timestamp()))
+            else:
+                date_strs.append(str(d))
+    else:
+        date_strs = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d)[:10] for d in idx]
+
     return jsonify({
-        'ticker': ticker,
-        'dates':  [d.strftime('%Y-%m-%d') for d in idx],
-        'prices': [fmt(p) for p in close.values],
-        'open':   [fmt(v) for v in open_.values],
-        'high':   [fmt(v) for v in high.values],
-        'low':    [fmt(v) for v in low.values],
-        'volume': [fmtv(v) for v in volume.values],
-        'ma5':    [fmt(v) for v in ma5],
-        'ma20':   [fmt(v) for v in ma20],
+        'ticker':      ticker,
+        'period':      period,
+        'intraday':    intraday,
+        'dates':       date_strs,
+        'prices':      [fmt(p) for p in close.values],
+        'open':        [fmt(v) for v in open_.values],
+        'high':        [fmt(v) for v in high.values],
+        'low':         [fmt(v) for v in low.values],
+        'volume':      [fmtv(v) for v in volume.values],
+        'ma5':         [fmt(v) for v in ma5],
+        'ma20':        [fmt(v) for v in ma20],
+        'rsi':         [fmt(v) for v in rsi],
+        'bb_upper':    [fmt(v) for v in bb_upper],
+        'bb_middle':   [fmt(v) for v in bb_middle],
+        'bb_lower':    [fmt(v) for v in bb_lower],
+        'macd':        [fmt(v) for v in macd],
+        'macd_signal': [fmt(v) for v in macd_signal],
+        'macd_hist':   [fmt(v) for v in macd_hist],
+        'trend':       trend,
     })
 
 
