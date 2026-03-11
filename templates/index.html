@@ -125,7 +125,6 @@
       border-bottom: 1px solid var(--border);
       font-size: 0.8rem;
       color: var(--blue);
-      display: none;
       align-items: center;
       gap: 0.75rem;
     }
@@ -527,11 +526,17 @@
     </div>
     <div id="company-meta" style="display:none;margin-bottom:0.75rem;"></div>
     <div id="company-desc" style="display:none;margin-bottom:1rem;"></div>
+    <div id="trend-badge" style="display:none;margin-bottom:0.75rem;"></div>
     <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem;">
       <div class="period-btns" style="margin-bottom:0">
-        <button class="period-btn" onclick="setPeriod(30)">1M</button>
-        <button class="period-btn active" onclick="setPeriod(90)">3M</button>
-        <button class="period-btn" onclick="setPeriod(180)">6M</button>
+        <button class="period-btn" id="pbtn-1d" onclick="setPeriod('1d')">1D</button>
+        <button class="period-btn" id="pbtn-1wk" onclick="setPeriod('1wk')">1W</button>
+        <button class="period-btn active" id="pbtn-1mo" onclick="setPeriod('1mo')">1M</button>
+        <button class="period-btn" id="pbtn-1y" onclick="setPeriod('1y')">1Y</button>
+      </div>
+      <div class="period-btns" style="margin-bottom:0;gap:0.4rem">
+        <button class="period-btn" id="btn-bb" onclick="toggleIndicator('bb')">BB</button>
+        <button class="period-btn" id="btn-rsi" onclick="toggleIndicator('rsi')">RSI</button>
       </div>
       <div class="period-btns" style="margin-bottom:0;margin-left:auto">
         <button class="period-btn active" id="btn-line" onclick="setChartType('line')">Liniowy</button>
@@ -555,6 +560,10 @@
       <canvas id="price-chart"></canvas>
     </div>
     <div id="candle-wrap" style="display:none;height:320px;border-radius:8px;overflow:hidden;"></div>
+    <div id="rsi-wrap" style="display:none;height:120px;margin-top:8px;position:relative;">
+      <canvas id="rsi-chart"></canvas>
+      <div style="position:absolute;right:4px;top:2px;font-size:0.7rem;color:var(--muted)">RSI(14)</div>
+    </div>
     <div id="calendar-section" class="cal-section" style="display:none">
       <div id="calendar-content"></div>
     </div>
@@ -738,7 +747,7 @@
     document.getElementById('count-info').textContent = `${rows.length} / ${allData.length} spółek`;
 
     if (rows.length === 0) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="9">Brak wyników</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="10">Brak wyników</td></tr>';
       return;
     }
 
@@ -788,7 +797,7 @@
       th.classList.remove('sort-asc', 'sort-desc');
     });
     const allThs = document.querySelectorAll('thead th');
-    const keyMap = ['number','name','ticker','price','daily_change_pct','daily_trend','ma5','ma5_trend','weight'];
+    const keyMap = ['number','name','ticker','sector','price','daily_change_pct','daily_trend','ma5','ma5_trend','weight'];
     const idx = keyMap.indexOf(key);
     if (idx >= 0 && allThs[idx]) {
       allThs[idx].classList.add(currentSort.dir === 'asc' ? 'sort-asc' : 'sort-desc');
@@ -1064,6 +1073,9 @@
   // ---- Wykres ----
   let chartInstance = null;
   let candleInstance = null;
+  let candleResizeObserver = null;
+  let rsiChartInstance = null;
+  let chartIsIntraday = false;
   let chartAllDates = [];
   let chartAllPrices = [];
   let chartAllOpen = [];
@@ -1071,10 +1083,40 @@
   let chartAllLow = [];
   let chartAllMa5 = [];
   let chartAllMa20 = [];
-  let activePeriod = 90;
+  let chartAllRsi = [];
+  let chartAllBbUpper = [];
+  let chartAllBbMiddle = [];
+  let chartAllBbLower = [];
+  let chartTrend = '';
+  let activePeriod = '1mo';
   let activeChartType = 'line';
+  let currentChartTicker = '';
+  let showBB = false;
+  let showRSI = false;
+
+  function applyChartData(data) {
+    chartIsIntraday = data.intraday || false;
+    chartAllDates   = data.dates;
+    chartAllPrices  = data.prices;
+    chartAllOpen    = data.open  || [];
+    chartAllHigh    = data.high  || [];
+    chartAllLow     = data.low   || [];
+    chartAllMa5     = data.ma5   || [];
+    chartAllMa20    = data.ma20  || [];
+    chartAllRsi     = data.rsi   || [];
+    chartAllBbUpper  = data.bb_upper  || [];
+    chartAllBbMiddle = data.bb_middle || [];
+    chartAllBbLower  = data.bb_lower  || [];
+    chartTrend      = data.trend || '';
+  }
+
+  function toTimeSeries(dates, arr) {
+    return dates.map((d, i) => ({ time: d, value: arr[i] })).filter(p => p.value != null);
+  }
 
   function openChart(yfticker, name, ticker, price, changePct) {
+    currentChartTicker = yfticker;
+    activePeriod = '1mo';
     document.getElementById('chart-name').textContent = name;
     document.getElementById('chart-ticker-label').textContent = ticker + ' · ' + yfticker;
     document.getElementById('chart-price').textContent = price != null ? price.toLocaleString('pl-PL', {minimumFractionDigits:2}) : '—';
@@ -1087,18 +1129,28 @@
       changeEl.textContent = '';
     }
 
+    // Reset indicator toggles
+    showBB = false;
+    showRSI = false;
+    const btnBb = document.getElementById('btn-bb');
+    const btnRsi = document.getElementById('btn-rsi');
+    if (btnBb) btnBb.classList.remove('active');
+    if (btnRsi) btnRsi.classList.remove('active');
+
     document.getElementById('chart-modal').classList.remove('hidden');
     document.getElementById('chart-loading').style.display = 'block';
     document.getElementById('chart-error').style.display = 'none';
     document.getElementById('chart-canvas-wrap').style.display = 'none';
     document.getElementById('candle-wrap').style.display = 'none';
+    document.getElementById('rsi-wrap').style.display = 'none';
     document.getElementById('company-meta').style.display = 'none';
     document.getElementById('company-desc').style.display = 'none';
     document.getElementById('calendar-section').style.display = 'none';
     if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
     if (candleInstance) { candleInstance.remove(); candleInstance = null; }
+    if (rsiChartInstance) { rsiChartInstance.destroy(); rsiChartInstance = null; }
 
-    const chartReq    = fetch('/api/chart/'    + encodeURIComponent(yfticker)).then(r => r.json());
+    const chartReq    = fetch('/api/chart/' + encodeURIComponent(yfticker) + '?period=' + activePeriod).then(r => r.json());
     const infoReq     = fetch('/api/info/'     + encodeURIComponent(yfticker)).then(r => r.json());
     const calendarReq = fetch('/api/calendar/' + encodeURIComponent(yfticker)).then(r => r.json());
 
@@ -1107,13 +1159,7 @@
         if (chartData.error) throw new Error(chartData.error);
 
         // Wykres
-        chartAllDates  = chartData.dates;
-        chartAllPrices = chartData.prices;
-        chartAllOpen   = chartData.open  || [];
-        chartAllHigh   = chartData.high  || [];
-        chartAllLow    = chartData.low   || [];
-        chartAllMa5    = chartData.ma5;
-        chartAllMa20   = chartData.ma20;
+        applyChartData(chartData);
         renderChartByType(activePeriod, activeChartType);
 
         // Metadane spółki
@@ -1209,34 +1255,131 @@
     section.style.display = 'block';
   }
 
-  function renderChartByType(days, type) {
-    activePeriod = days;
-    // Aktualizuj przyciski okresu (pierwsze 3 .period-btn)
-    const periodBtns = document.querySelectorAll('.period-btn');
-    const periodMap = {30: 0, 90: 1, 180: 2};
-    [0,1,2].forEach(i => periodBtns[i].classList.remove('active'));
-    periodBtns[periodMap[days] ?? 1].classList.add('active');
+  function updateTrendBadge() {
+    const el = document.getElementById('trend-badge');
+    if (!chartTrend || chartTrend === 'unknown') { el.style.display='none'; return; }
+    const cfg = {
+      bullish:  { label: 'Trend wzrostowy', color: '#2e9e5b', bg: '#d6f0e2', icon: '▲' },
+      bearish:  { label: 'Trend spadkowy',  color: '#c0392b', bg: '#fde8e6', icon: '▼' },
+      sideways: { label: 'Konsolidacja',    color: '#b7791f', bg: '#fef3c7', icon: '↔' },
+    }[chartTrend] || null;
+    if (!cfg) { el.style.display='none'; return; }
+    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:0.4rem;padding:0.3rem 0.75rem;border-radius:999px;background:${cfg.bg};color:${cfg.color};font-weight:700;font-size:0.8rem;">${cfg.icon} ${cfg.label}</span>`;
+    el.style.display = 'block';
+  }
+
+  function toggleIndicator(ind) {
+    if (ind === 'bb') {
+      showBB = !showBB;
+      document.getElementById('btn-bb').classList.toggle('active', showBB);
+    } else if (ind === 'rsi') {
+      showRSI = !showRSI;
+      document.getElementById('btn-rsi').classList.toggle('active', showRSI);
+    }
+    if (chartAllDates.length) renderChartByType(activePeriod, activeChartType);
+  }
+
+  function formatChartLabels(dates) {
+    if (!chartIsIntraday) return dates;
+    return dates.map(ts => {
+      const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
+      const h = d.getHours().toString().padStart(2, '0');
+      const m = d.getMinutes().toString().padStart(2, '0');
+      const day = d.getDate().toString().padStart(2, '0');
+      const mon = (d.getMonth() + 1).toString().padStart(2, '0');
+      if (activePeriod === '1d') return `${h}:${m}`;
+      return `${day}.${mon} ${h}:${m}`;
+    });
+  }
+
+  function renderRsiChart() {
+    const wrap = document.getElementById('rsi-wrap');
+    if (!showRSI || !chartAllRsi.length) {
+      wrap.style.display = 'none';
+      if (rsiChartInstance) { rsiChartInstance.destroy(); rsiChartInstance = null; }
+      return;
+    }
+    wrap.style.display = 'block';
+    const dates = formatChartLabels(chartAllDates);
+    const rsi = chartAllRsi;
+    if (rsiChartInstance) rsiChartInstance.destroy();
+    const ctx = document.getElementById('rsi-chart').getContext('2d');
+    rsiChartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: dates,
+        datasets: [
+          { label: 'RSI', data: rsi, borderColor: '#4a7fc1', borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          annotation: {},
+          tooltip: { callbacks: { label: ctx => ` RSI: ${ctx.parsed.y != null ? ctx.parsed.y.toFixed(1) : '—'}` } },
+        },
+        scales: {
+          x: { display: false },
+          y: {
+            min: 0, max: 100,
+            position: 'right',
+            grid: { color: '#edf2f8' },
+            ticks: { color: '#7a8fa6', font: { size: 10 }, stepSize: 30 },
+          },
+        },
+      },
+      plugins: [{
+        id: 'rsi-levels',
+        afterDraw(chart) {
+          const {ctx, scales: {y}} = chart;
+          ctx.save();
+          [30, 70].forEach(level => {
+            const yPos = y.getPixelForValue(level);
+            ctx.beginPath();
+            ctx.setLineDash([4, 3]);
+            ctx.strokeStyle = level === 70 ? '#c0392b55' : '#2e9e5b55';
+            ctx.lineWidth = 1;
+            ctx.moveTo(chart.chartArea.left, yPos);
+            ctx.lineTo(chart.chartArea.right, yPos);
+            ctx.stroke();
+          });
+          ctx.restore();
+        }
+      }]
+    });
+  }
+
+  function renderChartByType(period, type) {
+    activePeriod = period;
+    // Aktualizuj przyciski okresu
+    ['1d','1wk','1mo','1y'].forEach(p => {
+      const btn = document.getElementById('pbtn-' + p);
+      if (btn) btn.classList.toggle('active', p === period);
+    });
 
     document.getElementById('chart-loading').style.display = 'none';
 
+    updateTrendBadge();
+
     if (type === 'candle') {
-      renderCandleChart(days);
+      renderCandleChart();
     } else {
-      renderLineChart(days);
+      renderLineChart();
     }
   }
 
-  function renderLineChart(days) {
+  function renderLineChart() {
     document.getElementById('candle-wrap').style.display = 'none';
     document.getElementById('line-legend').style.display = '';
     document.getElementById('candle-legend').style.display = 'none';
     if (candleInstance) { candleInstance.remove(); candleInstance = null; }
 
-    const slice  = -days;
-    const dates  = chartAllDates.slice(slice);
-    const prices = chartAllPrices.slice(slice);
-    const ma5    = chartAllMa5.slice(slice);
-    const ma20   = chartAllMa20.slice(slice);
+    const dates  = formatChartLabels(chartAllDates);
+    const prices = chartAllPrices;
+    const ma5    = chartAllMa5;
+    const ma20   = chartAllMa20;
 
     document.getElementById('chart-canvas-wrap').style.display = 'block';
     if (chartInstance) { chartInstance.destroy(); }
@@ -1280,6 +1423,11 @@
             borderDash: [5, 3],
             order: 1,
           },
+          ...(showBB && chartAllBbUpper.length ? [
+            { label: 'BB Górna',    data: chartAllBbUpper,  borderColor: 'rgba(74,127,193,0.4)',  borderWidth: 1, pointRadius: 0, fill: false, tension: 0.3, borderDash: [3,2], order: 0 },
+            { label: 'BB Środkowa', data: chartAllBbMiddle, borderColor: 'rgba(74,127,193,0.25)', borderWidth: 1, pointRadius: 0, fill: false, tension: 0.3, borderDash: [3,2], order: 0 },
+            { label: 'BB Dolna',    data: chartAllBbLower,  borderColor: 'rgba(74,127,193,0.4)',  borderWidth: 1, pointRadius: 0, fill: false, tension: 0.3, borderDash: [3,2], order: 0 },
+          ] : []),
         ],
       },
       options: {
@@ -1313,9 +1461,10 @@
         },
       },
     });
+    renderRsiChart();
   }
 
-  function renderCandleChart(days) {
+  function renderCandleChart() {
     document.getElementById('chart-canvas-wrap').style.display = 'none';
     document.getElementById('line-legend').style.display = 'none';
     document.getElementById('candle-legend').style.display = '';
@@ -1326,14 +1475,13 @@
     wrap.innerHTML = '';
     if (candleInstance) { candleInstance.remove(); candleInstance = null; }
 
-    const slice  = -days;
-    const dates  = chartAllDates.slice(slice);
-    const opens  = chartAllOpen.slice(slice);
-    const highs  = chartAllHigh.slice(slice);
-    const lows   = chartAllLow.slice(slice);
-    const closes = chartAllPrices.slice(slice);
-    const ma5    = chartAllMa5.slice(slice);
-    const ma20   = chartAllMa20.slice(slice);
+    const dates  = chartAllDates;
+    const opens  = chartAllOpen;
+    const highs  = chartAllHigh;
+    const lows   = chartAllLow;
+    const closes = chartAllPrices;
+    const ma5    = chartAllMa5;
+    const ma20   = chartAllMa20;
 
     candleInstance = LightweightCharts.createChart(wrap, {
       layout: {
@@ -1368,22 +1516,59 @@
     })).filter(c => c.open != null && c.high != null && c.low != null && c.close != null));
 
     const ma5Series = candleInstance.addLineSeries({ color: '#e07b39', lineWidth: 1.5, priceLineVisible: false });
-    ma5Series.setData(dates.map((d, i) => ({ time: d, value: ma5[i] })).filter(p => p.value != null));
+    ma5Series.setData(toTimeSeries(dates, ma5));
 
     const ma20Series = candleInstance.addLineSeries({ color: '#9b59b6', lineWidth: 1.5, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false });
-    ma20Series.setData(dates.map((d, i) => ({ time: d, value: ma20[i] })).filter(p => p.value != null));
+    ma20Series.setData(toTimeSeries(dates, ma20));
+
+    if (showBB && chartAllBbUpper.length) {
+      const bbUpper = candleInstance.addLineSeries({ color: 'rgba(74,127,193,0.5)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false });
+      const bbLower = candleInstance.addLineSeries({ color: 'rgba(74,127,193,0.5)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false });
+      bbUpper.setData(toTimeSeries(dates, chartAllBbUpper));
+      bbLower.setData(toTimeSeries(dates, chartAllBbLower));
+    }
 
     candleInstance.timeScale().fitContent();
 
     // responsywność
-    const ro = new ResizeObserver(() => {
+    if (candleResizeObserver) candleResizeObserver.disconnect();
+    candleResizeObserver = new ResizeObserver(() => {
       if (candleInstance) candleInstance.applyOptions({ width: wrap.clientWidth });
     });
-    ro.observe(wrap);
+    candleResizeObserver.observe(wrap);
+    renderRsiChart();
   }
 
-  function setPeriod(days) {
-    if (chartAllDates.length) renderChartByType(days, activeChartType);
+  function setPeriod(period) {
+    if (!currentChartTicker) return;
+    activePeriod = period;
+    // Aktualizuj przyciski okresu od razu
+    ['1d','1wk','1mo','1y'].forEach(p => {
+      const btn = document.getElementById('pbtn-' + p);
+      if (btn) btn.classList.toggle('active', p === period);
+    });
+    // Pokaż loading, zresetuj wykresy
+    document.getElementById('chart-loading').style.display = 'block';
+    document.getElementById('chart-canvas-wrap').style.display = 'none';
+    document.getElementById('candle-wrap').style.display = 'none';
+    document.getElementById('rsi-wrap').style.display = 'none';
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    if (candleInstance) { candleInstance.remove(); candleInstance = null; }
+    if (rsiChartInstance) { rsiChartInstance.destroy(); rsiChartInstance = null; }
+    // Pobierz nowe dane
+    fetch('/api/chart/' + encodeURIComponent(currentChartTicker) + '?period=' + period)
+      .then(r => r.json())
+      .then(chartData => {
+        if (chartData.error) throw new Error(chartData.error);
+        applyChartData(chartData);
+        renderChartByType(period, activeChartType);
+      })
+      .catch(e => {
+        document.getElementById('chart-loading').style.display = 'none';
+        const errEl = document.getElementById('chart-error');
+        errEl.textContent = 'Błąd: ' + e.message;
+        errEl.style.display = 'block';
+      });
   }
 
   function setChartType(type) {
@@ -1392,6 +1577,7 @@
     document.getElementById('btn-candle').classList.toggle('active', type === 'candle');
     if (chartAllDates.length) renderChartByType(activePeriod, type);
   }
+
 
   function toggleDesc() {
     const rest = document.getElementById('desc-rest');
@@ -1409,6 +1595,8 @@
     document.getElementById('chart-modal').classList.add('hidden');
     if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
     if (candleInstance) { candleInstance.remove(); candleInstance = null; }
+    if (rsiChartInstance) { rsiChartInstance.destroy(); rsiChartInstance = null; }
+    if (candleResizeObserver) { candleResizeObserver.disconnect(); candleResizeObserver = null; }
   }
 
   function closeChartOnBackdrop(e) {
