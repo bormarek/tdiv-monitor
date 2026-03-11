@@ -1073,6 +1073,8 @@
   // ---- Wykres ----
   let chartInstance = null;
   let candleInstance = null;
+  let candleResizeObserver = null;
+  let rsiChartInstance = null;
   let chartIsIntraday = false;
   let chartAllDates = [];
   let chartAllPrices = [];
@@ -1081,20 +1083,36 @@
   let chartAllLow = [];
   let chartAllMa5 = [];
   let chartAllMa20 = [];
+  let chartAllRsi = [];
+  let chartAllBbUpper = [];
+  let chartAllBbMiddle = [];
+  let chartAllBbLower = [];
+  let chartTrend = '';
   let activePeriod = '1mo';
   let activeChartType = 'line';
   let currentChartTicker = '';
   let showBB = false;
   let showRSI = false;
-  let chartAllRsi = [];
-  let chartAllBbUpper = [];
-  let chartAllBbMiddle = [];
-  let chartAllBbLower = [];
-  let chartAllMacd = [];
-  let chartAllMacdSignal = [];
-  let chartAllMacdHist = [];
-  let chartTrend = '';
-  let rsiChartInstance = null;
+
+  function applyChartData(data) {
+    chartIsIntraday = data.intraday || false;
+    chartAllDates   = data.dates;
+    chartAllPrices  = data.prices;
+    chartAllOpen    = data.open  || [];
+    chartAllHigh    = data.high  || [];
+    chartAllLow     = data.low   || [];
+    chartAllMa5     = data.ma5   || [];
+    chartAllMa20    = data.ma20  || [];
+    chartAllRsi     = data.rsi   || [];
+    chartAllBbUpper  = data.bb_upper  || [];
+    chartAllBbMiddle = data.bb_middle || [];
+    chartAllBbLower  = data.bb_lower  || [];
+    chartTrend      = data.trend || '';
+  }
+
+  function toTimeSeries(dates, arr) {
+    return dates.map((d, i) => ({ time: d, value: arr[i] })).filter(p => p.value != null);
+  }
 
   function openChart(yfticker, name, ticker, price, changePct) {
     currentChartTicker = yfticker;
@@ -1141,22 +1159,7 @@
         if (chartData.error) throw new Error(chartData.error);
 
         // Wykres
-        chartIsIntraday    = chartData.intraday || false;
-        chartAllDates      = chartData.dates;
-        chartAllPrices     = chartData.prices;
-        chartAllOpen       = chartData.open  || [];
-        chartAllHigh       = chartData.high  || [];
-        chartAllLow        = chartData.low   || [];
-        chartAllMa5        = chartData.ma5;
-        chartAllMa20       = chartData.ma20;
-        chartAllRsi        = chartData.rsi || [];
-        chartAllBbUpper    = chartData.bb_upper || [];
-        chartAllBbMiddle   = chartData.bb_middle || [];
-        chartAllBbLower    = chartData.bb_lower || [];
-        chartAllMacd       = chartData.macd || [];
-        chartAllMacdSignal = chartData.macd_signal || [];
-        chartAllMacdHist   = chartData.macd_hist || [];
-        chartTrend         = chartData.trend || '';
+        applyChartData(chartData);
         renderChartByType(activePeriod, activeChartType);
 
         // Metadane spółki
@@ -1513,25 +1516,26 @@
     })).filter(c => c.open != null && c.high != null && c.low != null && c.close != null));
 
     const ma5Series = candleInstance.addLineSeries({ color: '#e07b39', lineWidth: 1.5, priceLineVisible: false });
-    ma5Series.setData(dates.map((d, i) => ({ time: d, value: ma5[i] })).filter(p => p.value != null));
+    ma5Series.setData(toTimeSeries(dates, ma5));
 
     const ma20Series = candleInstance.addLineSeries({ color: '#9b59b6', lineWidth: 1.5, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false });
-    ma20Series.setData(dates.map((d, i) => ({ time: d, value: ma20[i] })).filter(p => p.value != null));
+    ma20Series.setData(toTimeSeries(dates, ma20));
 
     if (showBB && chartAllBbUpper.length) {
       const bbUpper = candleInstance.addLineSeries({ color: 'rgba(74,127,193,0.5)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false });
       const bbLower = candleInstance.addLineSeries({ color: 'rgba(74,127,193,0.5)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false });
-      bbUpper.setData(dates.map((d, i) => ({ time: d, value: chartAllBbUpper[i] })).filter(p => p.value != null));
-      bbLower.setData(dates.map((d, i) => ({ time: d, value: chartAllBbLower[i] })).filter(p => p.value != null));
+      bbUpper.setData(toTimeSeries(dates, chartAllBbUpper));
+      bbLower.setData(toTimeSeries(dates, chartAllBbLower));
     }
 
     candleInstance.timeScale().fitContent();
 
     // responsywność
-    const ro = new ResizeObserver(() => {
+    if (candleResizeObserver) candleResizeObserver.disconnect();
+    candleResizeObserver = new ResizeObserver(() => {
       if (candleInstance) candleInstance.applyOptions({ width: wrap.clientWidth });
     });
-    ro.observe(wrap);
+    candleResizeObserver.observe(wrap);
     renderRsiChart();
   }
 
@@ -1556,22 +1560,7 @@
       .then(r => r.json())
       .then(chartData => {
         if (chartData.error) throw new Error(chartData.error);
-        chartIsIntraday    = chartData.intraday || false;
-        chartAllDates      = chartData.dates;
-        chartAllPrices     = chartData.prices;
-        chartAllOpen       = chartData.open  || [];
-        chartAllHigh       = chartData.high  || [];
-        chartAllLow        = chartData.low   || [];
-        chartAllMa5        = chartData.ma5;
-        chartAllMa20       = chartData.ma20;
-        chartAllRsi        = chartData.rsi || [];
-        chartAllBbUpper    = chartData.bb_upper || [];
-        chartAllBbMiddle   = chartData.bb_middle || [];
-        chartAllBbLower    = chartData.bb_lower || [];
-        chartAllMacd       = chartData.macd || [];
-        chartAllMacdSignal = chartData.macd_signal || [];
-        chartAllMacdHist   = chartData.macd_hist || [];
-        chartTrend         = chartData.trend || '';
+        applyChartData(chartData);
         renderChartByType(period, activeChartType);
       })
       .catch(e => {
@@ -1607,6 +1596,7 @@
     if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
     if (candleInstance) { candleInstance.remove(); candleInstance = null; }
     if (rsiChartInstance) { rsiChartInstance.destroy(); rsiChartInstance = null; }
+    if (candleResizeObserver) { candleResizeObserver.disconnect(); candleResizeObserver = null; }
   }
 
   function closeChartOnBackdrop(e) {

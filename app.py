@@ -137,6 +137,7 @@ CACHE_TTL          = 900    # 15 minut
 INFO_CACHE_TTL     = 86400  # 24 godziny
 CALENDAR_CACHE_TTL = 3600   # 1 godzina
 MARKET_CAL_TTL     = 3600   # 1 godzina
+CHART_CACHE_TTL    = 300    # 5 minut (intraday); dzienna = 900 s
 
 # ── Ticker helpers (TDIV / Bloomberg) ────────────────────────────────────────
 
@@ -909,6 +910,30 @@ def get_market_calendar():
     return jsonify(result)
 
 
+def _calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
+    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, float('inf'))
+    return 100 - (100 / (1 + rs))
+
+
+def _calc_bb(series, period=20, std=2):
+    mid = series.rolling(period).mean()
+    sd = series.rolling(period).std()
+    return mid + std * sd, mid, mid - std * sd
+
+
+def _fmt(v):
+    return round(float(v), 2) if not pd.isna(v) else None
+
+
+def _fmtv(v):
+    return int(v) if not pd.isna(v) else None
+
+
 @app.route('/api/chart/<path:ticker>')
 def get_chart(ticker):
     # Obsługiwane okresy: 1d, 1wk, 1mo (domyślny), 1y
@@ -921,6 +946,12 @@ def get_chart(ticker):
     }
     if period not in PERIOD_CONFIG:
         period = '1mo'
+
+    ttl = CHART_CACHE_TTL if period in ('1d', '1wk') else CACHE_TTL
+    cached = cache_get('chart', f'{ticker}_{period}', ttl)
+    if cached is not None:
+        return jsonify(cached)
+
     cfg = PERIOD_CONFIG[period]
     intraday = period in ('1d', '1wk')
     try:
@@ -946,50 +977,24 @@ def get_chart(ticker):
     volume = col('Volume')
 
     # Wyrównaj indeks do dni gdy close nie jest NaN
-    idx   = close.dropna().index
-    close = close.loc[idx]
-    open_ = open_.loc[idx]
-    high  = high.loc[idx]
-    low   = low.loc[idx]
+    idx    = close.dropna().index
+    close  = close.loc[idx]
+    open_  = open_.loc[idx]
+    high   = high.loc[idx]
+    low    = low.loc[idx]
     volume = volume.loc[idx]
 
     ma5  = close.rolling(5).mean()
     ma20 = close.rolling(20).mean()
-    fmt  = lambda v: round(float(v), 2) if not pd.isna(v) else None
-    fmtv = lambda v: int(v) if not pd.isna(v) else None
-
-    def _calc_rsi(series, period=14):
-        delta = series.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
-        avg_gain = gain.ewm(com=period-1, min_periods=period).mean()
-        avg_loss = loss.ewm(com=period-1, min_periods=period).mean()
-        rs = avg_gain / avg_loss.replace(0, float('inf'))
-        return 100 - (100 / (1 + rs))
-
-    def _calc_macd(series, fast=12, slow=26, signal=9):
-        ema_fast = series.ewm(span=fast, adjust=False).mean()
-        ema_slow = series.ewm(span=slow, adjust=False).mean()
-        macd = ema_fast - ema_slow
-        sig = macd.ewm(span=signal, adjust=False).mean()
-        return macd, sig, macd - sig
-
-    def _calc_bb(series, period=20, std=2):
-        mid = series.rolling(period).mean()
-        sd = series.rolling(period).std()
-        return mid + std*sd, mid, mid - std*sd
 
     rsi = _calc_rsi(close)
     bb_upper, bb_middle, bb_lower = _calc_bb(close)
-    macd, macd_signal, macd_hist = _calc_macd(close)
 
     # Trend
-    if len(ma20.dropna()) >= 21:
-        ma20_now  = ma20.dropna().iloc[-1]
-        ma20_prev = ma20.dropna().iloc[-21] if len(ma20.dropna()) >= 21 else ma20.dropna().iloc[0]
-        price_now = close.iloc[-1]
-        ma20_rising = ma20_now > ma20_prev
-        price_above = price_now > ma20_now
+    ma20_clean = ma20.dropna()
+    if len(ma20_clean) >= 21:
+        ma20_rising = ma20_clean.iloc[-1] > ma20_clean.iloc[-21]
+        price_above = close.iloc[-1] > ma20_clean.iloc[-1]
         if ma20_rising and price_above:
             trend = 'bullish'
         elif not ma20_rising and not price_above:
@@ -1001,36 +1006,30 @@ def get_chart(ticker):
 
     # Format dat: intraday → Unix timestamp (sekundy UTC) dla lightweight-charts, daily → YYYY-MM-DD
     if intraday:
-        date_strs = []
-        for d in idx:
-            if hasattr(d, 'timestamp'):
-                date_strs.append(int(d.timestamp()))
-            else:
-                date_strs.append(str(d))
+        date_strs = [int(d.timestamp()) if hasattr(d, 'timestamp') else str(d) for d in idx]
     else:
         date_strs = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d)[:10] for d in idx]
 
-    return jsonify({
-        'ticker':      ticker,
-        'period':      period,
-        'intraday':    intraday,
-        'dates':       date_strs,
-        'prices':      [fmt(p) for p in close.values],
-        'open':        [fmt(v) for v in open_.values],
-        'high':        [fmt(v) for v in high.values],
-        'low':         [fmt(v) for v in low.values],
-        'volume':      [fmtv(v) for v in volume.values],
-        'ma5':         [fmt(v) for v in ma5],
-        'ma20':        [fmt(v) for v in ma20],
-        'rsi':         [fmt(v) for v in rsi],
-        'bb_upper':    [fmt(v) for v in bb_upper],
-        'bb_middle':   [fmt(v) for v in bb_middle],
-        'bb_lower':    [fmt(v) for v in bb_lower],
-        'macd':        [fmt(v) for v in macd],
-        'macd_signal': [fmt(v) for v in macd_signal],
-        'macd_hist':   [fmt(v) for v in macd_hist],
-        'trend':       trend,
-    })
+    result = {
+        'ticker':    ticker,
+        'period':    period,
+        'intraday':  intraday,
+        'dates':     date_strs,
+        'prices':    [_fmt(p) for p in close.values],
+        'open':      [_fmt(v) for v in open_.values],
+        'high':      [_fmt(v) for v in high.values],
+        'low':       [_fmt(v) for v in low.values],
+        'volume':    [_fmtv(v) for v in volume.values],
+        'ma5':       [_fmt(v) for v in ma5],
+        'ma20':      [_fmt(v) for v in ma20],
+        'rsi':       [_fmt(v) for v in rsi],
+        'bb_upper':  [_fmt(v) for v in bb_upper],
+        'bb_middle': [_fmt(v) for v in bb_middle],
+        'bb_lower':  [_fmt(v) for v in bb_lower],
+        'trend':     trend,
+    }
+    cache_set('chart', f'{ticker}_{period}', result)
+    return jsonify(result)
 
 
 @app.route('/api/upload', methods=['POST'])
