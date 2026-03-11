@@ -824,7 +824,6 @@
 
       allData = json.data;
 
-      document.getElementById('fund-subtitle').textContent = json.fund?.name || '';
       document.getElementById('stat-up').innerHTML   = `&#x25B2; ${json.summary.up}`;
       document.getElementById('stat-down').innerHTML = `&#x25BC; ${json.summary.down}`;
       document.getElementById('stat-unk').innerHTML  = `&#x3F; ${json.summary.unknown}`;
@@ -906,7 +905,6 @@
       if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
 
       allData = json.data;
-      document.getElementById('fund-subtitle').textContent = json.fund?.name || '';
       document.getElementById('stat-up').innerHTML   = `&#x25B2; ${json.summary.up}`;
       document.getElementById('stat-down').innerHTML = `&#x25BC; ${json.summary.down}`;
       document.getElementById('stat-unk').innerHTML  = `&#x3F; ${json.summary.unknown}`;
@@ -948,7 +946,6 @@
       <button class="fund-tab ${f.id === currentFund ? 'active' : ''}"
               data-fund="${f.id}" onclick="switchFund('${f.id}')">
         <span class="fund-short">${f.short}</span>
-        <span class="fund-long">${f.name}</span>
       </button>`).join('') + `
       <button class="fund-tab upload-tab" data-fund="upload" onclick="switchFund('upload')">
         <span class="fund-short">&#128194;</span>
